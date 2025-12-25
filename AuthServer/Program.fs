@@ -7,7 +7,6 @@ open System.Security.Cryptography
 open Microsoft.AspNetCore.Builder
 open Microsoft.AspNetCore.Http
 open Microsoft.Extensions.Hosting
-open System.Threading.Tasks
 
 // ================= MODELS =================
 
@@ -17,8 +16,7 @@ type OAuthRequest =
       version: string
       nonce: string
       [<JsonPropertyName("sig")>]
-      ``sig``: string }
-
+      sig_: string }
 
 // ================= APP =================
 
@@ -30,20 +28,17 @@ let app = builder.Build()
 let firebaseDbUrl =
     match Environment.GetEnvironmentVariable("FIREBASE_DB_URL") with
     | null | "" -> failwith "FIREBASE_DB_URL not set"
-    | v -> v
-
-let secretKey =
-    match Environment.GetEnvironmentVariable("SECRET_KEY") with
-    | null | "" -> "HMX_BY_MR_ARPIT_120"
-    | v -> v
+    | v -> v.TrimEnd('/')
 
 // ================= SECURITY =================
 
+let SECRET_KEY = "HMX_BY_MR_ARPIT_120"
+
 let computeHmac (input: string) =
-    use hmac = new HMACSHA256(Encoding.UTF8.GetBytes(secretKey))
+    use hmac = new HMACSHA256(Encoding.UTF8.GetBytes(SECRET_KEY))
     hmac.ComputeHash(Encoding.UTF8.GetBytes(input))
-    |> Convert.ToHexString
-    |> fun s -> s.ToLowerInvariant()
+    |> Array.map (fun b -> b.ToString("x2"))
+    |> String.concat ""
 
 // ================= HTTP =================
 
@@ -56,63 +51,117 @@ let getJson (url: string) =
         return JsonDocument.Parse(txt).RootElement
     }
 
+let putJson (url: string) (body: obj) =
+    task {
+        let json = JsonSerializer.Serialize(body)
+        let content = new StringContent(json, Encoding.UTF8, "application/json")
+        let! _ = http.PutAsync(url, content)
+        return ()
+    }
+
 // ================= HEALTH =================
 
-app.MapGet(
-    "/",
-    fun (ctx: HttpContext) ->
-        ctx.Response.WriteAsync("AuthServer running")
+app.MapGet("/", fun () ->
+    Results.Text("AuthServer running")
 ) |> ignore
-
 
 // ================= API =================
 
-app.MapPost(
-    "/hmx/oauth",
-    fun (ctx: HttpContext) ->
-        task {
-            ctx.Response.ContentType <- "application/json"
-
-            try
-                let! req =
-                    JsonSerializer.DeserializeAsync<OAuthRequest>(
-                        ctx.Request.Body,
-                        JsonSerializerOptions(PropertyNameCaseInsensitive = true)
-                    )
-
-                let raw = req.id + req.hwid + req.version + req.nonce
-                let expectedSig = computeHmac raw
-
-                printfn "RAW=%s EXPECTED=%s GOT=%s" raw expectedSig req.``sig``
-
-                if not (String.Equals(expectedSig, req.``sig``, StringComparison.OrdinalIgnoreCase)) then
-                    ctx.Response.StatusCode <- 401
-                    do! ctx.Response.WriteAsync("""{"success":false,"error":"Invalid signature"}""")
-                else
-                    let! appJson = getJson $"{firebaseDbUrl}/app.json"
-                    let! userJson = getJson $"{firebaseDbUrl}/users/{req.id}.json"
-
-                    if userJson.ValueKind = JsonValueKind.Null then
-                        ctx.Response.StatusCode <- 404
-                        do! ctx.Response.WriteAsync("""{"success":false,"error":"User not found"}""")
-                    else
-                        let response =
-                            JsonSerializer.Serialize(
-                                {| success = true
-                                   app = appJson
-                                   user = userJson |}
-                            )
-
-                        ctx.Response.StatusCode <- 200
-                        do! ctx.Response.WriteAsync(response)
-            with ex ->
-                ctx.Response.StatusCode <- 500
-                do! ctx.Response.WriteAsync(
-                    JsonSerializer.Serialize(
-                        {| success = false; error = ex.Message |}
-                    )
+app.MapPost("/hmx/oauth", fun (ctx: HttpContext) ->
+    task {
+        try
+            let! req =
+                JsonSerializer.DeserializeAsync<OAuthRequest>(
+                    ctx.Request.Body,
+                    JsonSerializerOptions(PropertyNameCaseInsensitive = true)
                 )
-        } :> Task
+
+            if isNull req then
+                return Results.Json(
+                    {| success = false; error = "Invalid request" |},
+                    statusCode = 400
+                )
+
+            // ===== HMAC =====
+            let raw = req.id + req.hwid + req.version + req.nonce
+            let expectedSig = computeHmac raw
+
+            if not (expectedSig.Equals(req.sig_, StringComparison.OrdinalIgnoreCase)) then
+                return Results.Json(
+                    {| success = false; error = "Invalid signature" |},
+                    statusCode = 401
+                )
+
+            let now = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
+
+            // ===== HWID ATTEMPTS =====
+            let hwidPath = $"{firebaseDbUrl}/hwid_attempts/{req.hwid}.json"
+            let! hwidJson = getJson hwidPath
+
+            let mutable attempts = 0
+            let mutable banUntil = 0L
+
+            if hwidJson.ValueKind <> JsonValueKind.Null then
+                if hwidJson.TryGetProperty("count", &_) then
+                    attempts <- hwidJson.GetProperty("count").GetInt32()
+                if hwidJson.TryGetProperty("banUntil", &_) then
+                    banUntil <- hwidJson.GetProperty("banUntil").GetInt64()
+
+            if banUntil > now then
+                return Results.Json(
+                    {| success = false
+                       reason = "HWID_BANNED"
+                       retryAfter = banUntil - now |},
+                    statusCode = 403
+                )
+
+            // ===== VERSION CHECK (STRICT) =====
+            let! appJson = getJson $"{firebaseDbUrl}/app.json"
+            let serverVersion = appJson.GetProperty("version").GetString()
+
+            if req.version <> serverVersion then
+                return Results.Json(
+                    {| success = false
+                       reason = "VERSION_MISMATCH"
+                       requiredVersion = serverVersion |},
+                    statusCode = 426
+                )
+
+            // ===== USER CHECK =====
+            let! userJson = getJson $"{firebaseDbUrl}/users/{req.id}.json"
+
+            if userJson.ValueKind = JsonValueKind.Null then
+                attempts <- attempts + 1
+
+                let banTime =
+                    if attempts >= 3 then now + 86400L else 0L
+
+                do!
+                    putJson hwidPath
+                        {| count = attempts
+                           lastFail = now
+                           banUntil = banTime |}
+
+                return Results.Json(
+                    {| success = false
+                       error = "Invalid ID"
+                       attemptsLeft = max 0 (3 - attempts) |},
+                    statusCode = 401
+                )
+
+            // ===== SUCCESS =====
+            do! http.DeleteAsync(hwidPath) |> Async.AwaitTask
+
+            return Results.Ok(
+                {| success = true
+                   user = userJson |}
+            )
+        with ex ->
+            return Results.Json(
+                {| success = false; error = ex.Message |},
+                statusCode = 500
+            )
+    }
 ) |> ignore
 
 // ================= RUN =================
