@@ -32,7 +32,7 @@ let firebaseDbUrl =
 
 // ================= SECURITY =================
 
-let SECRET = "HMX_SUPER_SECRET_2025"
+let SECRET_KEY = "HMX_BY_MR_ARPIT_120"
 
 let computeHmac (input: string) =
     use hmac = new HMACSHA256(Encoding.UTF8.GetBytes(SECRET))
