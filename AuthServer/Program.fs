@@ -46,6 +46,7 @@ app.MapPost(
     RequestDelegate(fun ctx ->
         async {
             try
+                // Deserialize the incoming request body
                 let! body =
                     JsonSerializer.DeserializeAsync<JsonElement>(ctx.Request.Body) |> Async.AwaitTask
 
@@ -148,4 +149,3 @@ app.MapPost(
 ) |> ignore
 
 app.Run()
-
