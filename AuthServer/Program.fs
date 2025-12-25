@@ -5,6 +5,7 @@ open Microsoft.AspNetCore.Builder
 open Microsoft.AspNetCore.Http
 open Microsoft.Extensions.Hosting
 open Microsoft.Extensions.DependencyInjection
+open System.Threading.Tasks
 
 // ------------------ MODELS ------------------
 
@@ -20,10 +21,14 @@ type ApiResponse =
 // ------------------ APP SETUP ------------------
 
 let builder = WebApplication.CreateBuilder()
+
 builder.Services.AddRouting() |> ignore
 builder.Services.AddEndpointsApiExplorer() |> ignore
 
 let app = builder.Build()
+
+// ⭐ REQUIRED — fixes 404
+app.UseRouting()
 
 // ------------------ ENV ------------------
 
@@ -48,7 +53,7 @@ let getJson (url: string) =
 
 app.MapPost(
     "/hmx/oauth",
-    Func<HttpContext, Threading.Tasks.Task>(fun ctx ->
+    Func<HttpContext, Task>(fun ctx ->
         task {
             try
                 let! req =
@@ -82,7 +87,7 @@ app.MapPost(
                               else Some "User not found" }
 
                     do! ctx.Response.WriteAsJsonAsync(response)
-            with ex
+            with ex ->
                 ctx.Response.StatusCode <- 500
                 do! ctx.Response.WriteAsJsonAsync(
                     {| success = false; error = ex.Message |}
