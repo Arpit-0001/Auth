@@ -90,11 +90,15 @@ app.MapPost("/hmx/oauth",
                 let mutable banUntil = 0L
 
                 if hwidJson.ValueKind <> JsonValueKind.Null then
-                    if hwidJson.TryGetProperty("count", &_) then
-                        attempts <- hwidJson.GetProperty("count").GetInt32()
+                    let mutable countProp = Unchecked.defaultof<JsonElement>
+                    let mutable banProp = Unchecked.defaultof<JsonElement>
+                
+                    if hwidJson.TryGetProperty("count", &countProp) then
+                        attempts <- countProp.GetInt32()
+                
+                    if hwidJson.TryGetProperty("banUntil", &banProp) then
+                        banUntil <- banProp.GetInt64()
 
-                    if hwidJson.TryGetProperty("banUntil", &_) then
-                        banUntil <- hwidJson.GetProperty("banUntil").GetInt64()
 
                 if banUntil > now then
                     return Results.Json(
