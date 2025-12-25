@@ -67,14 +67,15 @@ app.MapGet("/", fun () ->
 
 // ================= API =================
 
-app.MapPost("/hmx/oauth", fun (ctx: HttpContext) ->
-    task {
-        try
-            let! req =
-                JsonSerializer.DeserializeAsync<OAuthRequest>(
-                    ctx.Request.Body,
-                    JsonSerializerOptions(PropertyNameCaseInsensitive = true)
-                )
+app.MapPost(
+    "/hmx/oauth",
+    Func<HttpContext, Threading.Tasks.Task<IResult>>(fun ctx ->
+        task {
+            // handler body
+        }
+    )
+) |> ignore
+
 
             if isNull req then
                 return Results.Json(
