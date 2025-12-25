@@ -73,11 +73,9 @@ app.MapPost(
     Func<HttpContext, Task<IResult>>(fun ctx ->
         task {
             try
-                // ===== READ BODY =====
-                let! req =
-                    ctx.Request.ReadFromJsonAsync<OAuthRequest>()
+                let! req = ctx.Request.ReadFromJsonAsync<OAuthRequest>()
 
-                // ===== HMAC CHECK =====
+                // ===== HMAC =====
                 let raw = req.id + req.hwid + req.version + req.nonce
                 let expectedSig = computeHmac raw
 
@@ -130,24 +128,24 @@ app.MapPost(
                 let! userJson = getJson $"{firebaseDbUrl}/users/{req.id}.json"
 
                 if userJson.ValueKind = JsonValueKind.Null then
-                    attempts <- attempts + 1
-                    let banTime = if attempts >= 3 then now + 86400L else 0L
+                    let newAttempts = attempts + 1
+                    let banTime = if newAttempts >= 3 then now + 86400L else 0L
 
                     do!
                         putJson hwidPath
-                            {| count = attempts
+                            {| count = newAttempts
                                lastFail = now
                                banUntil = banTime |}
 
                     return Results.Json(
                         {| success = false
                            error = "Invalid ID"
-                           attemptsLeft = max 0 (3 - attempts) |},
+                           attemptsLeft = max 0 (3 - newAttempts) |},
                         statusCode = 401
                     )
 
                 // ===== SUCCESS =====
-                do! http.DeleteAsync(hwidPath)
+                let! _ = http.DeleteAsync(hwidPath)
 
                 return Results.Ok(
                     {| success = true
