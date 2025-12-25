@@ -30,15 +30,15 @@ let firebaseDbUrl =
     | null | "" -> failwith "FIREBASE_DB_URL not set"
     | v -> v
 
-// ================= SECURITY =================
-
-let SECRET_KEY =
+let secretKey =
     match Environment.GetEnvironmentVariable("SECRET_KEY") with
-    | null | "" -> "HMX_BY_MR_ARPIT_120"   // fallback
+    | null | "" -> "HMX_BY_MR_ARPIT_120"
     | v -> v
 
+// ================= SECURITY =================
+
 let computeHmac (input: string) =
-    use hmac = new HMACSHA256(Encoding.UTF8.GetBytes(SECRET_KEY))
+    use hmac = new HMACSHA256(Encoding.UTF8.GetBytes(secretKey))
     hmac.ComputeHash(Encoding.UTF8.GetBytes(input))
     |> Convert.ToHexString
     |> fun s -> s.ToLowerInvariant()
@@ -57,7 +57,7 @@ let getJson (url: string) =
 // ================= HEALTH =================
 
 app.MapGet("/", fun () ->
-    Results.Text("AuthServer running")
+    "AuthServer running"
 ) |> ignore
 
 // ================= API =================
@@ -66,54 +66,52 @@ app.MapPost(
     "/hmx/oauth",
     RequestDelegate(fun ctx ->
         task {
+            ctx.Response.ContentType <- "application/json"
+
             try
-                let! req =
-                    JsonSerializer.DeserializeAsync<OAuthRequest>(
+                let! reqOpt =
+                    JsonSerializer.DeserializeAsync<OAuthRequest option>(
                         ctx.Request.Body,
                         JsonSerializerOptions(PropertyNameCaseInsensitive = true)
                     )
 
-                if isNull req then
-                    return! Results.BadRequest("Invalid JSON").ExecuteAsync(ctx)
+                match reqOpt with
+                | None ->
+                    ctx.Response.StatusCode <- 400
+                    do! ctx.Response.WriteAsync("""{"success":false,"error":"Invalid JSON"}""")
 
-                let raw = req.id + req.hwid + req.version + req.nonce
-                let expectedSig = computeHmac raw
+                | Some req ->
+                    let raw = req.id + req.hwid + req.version + req.nonce
+                    let expectedSig = computeHmac raw
 
-                if not (String.Equals(expectedSig, req.sigValue, StringComparison.OrdinalIgnoreCase)) then
-                    let res =
-                        Results.Json(
-                            {| success = false; error = "Invalid signature" |},
-                            statusCode = 401
-                        )
-                    return! res.ExecuteAsync(ctx)
+                    if not (String.Equals(expectedSig, req.sigValue, StringComparison.OrdinalIgnoreCase)) then
+                        ctx.Response.StatusCode <- 401
+                        do! ctx.Response.WriteAsync("""{"success":false,"error":"Invalid signature"}""")
+                    else
+                        let! appJson = getJson $"{firebaseDbUrl}/app.json"
+                        let! userJson = getJson $"{firebaseDbUrl}/users/{req.id}.json"
 
-                let! appJson = getJson $"{firebaseDbUrl}/app.json"
-                let! userJson = getJson $"{firebaseDbUrl}/users/{req.id}.json"
+                        if userJson.ValueKind = JsonValueKind.Null then
+                            ctx.Response.StatusCode <- 404
+                            do! ctx.Response.WriteAsync("""{"success":false,"error":"User not found"}""")
+                        else
+                            let response =
+                                JsonSerializer.Serialize(
+                                    {| success = true
+                                       app = appJson
+                                       user = userJson |}
+                                )
 
-                if userJson.ValueKind = JsonValueKind.Null then
-                    let res =
-                        Results.Json(
-                            {| success = false; error = "User not found" |},
-                            statusCode = 404
-                        )
-                    return! res.ExecuteAsync(ctx)
-
-                let res =
-                    Results.Ok(
-                        {| success = true
-                           app = appJson
-                           user = userJson |}
-                    )
-
-                return! res.ExecuteAsync(ctx)
+                            ctx.Response.StatusCode <- 200
+                            do! ctx.Response.WriteAsync(response)
 
             with ex ->
-                let res =
-                    Results.Json(
-                        {| success = false; error = ex.Message |},
-                        statusCode = 500
+                ctx.Response.StatusCode <- 500
+                do! ctx.Response.WriteAsync(
+                    JsonSerializer.Serialize(
+                        {| success = false; error = ex.Message |}
                     )
-                return! res.ExecuteAsync(ctx)
+                )
         }
     )
 ) |> ignore
