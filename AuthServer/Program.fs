@@ -13,62 +13,65 @@ open Google.Apis.Auth.OAuth2
 
 module Program =
 
-    /// Initialize Firebase using ENV variable
-    let initFirebase () =
-        if FirebaseApp.DefaultInstance = null then
+    let mutable firebaseInitialized = false
+
+    let tryInitFirebase () =
+        if not firebaseInitialized then
             let json = Environment.GetEnvironmentVariable("FIREBASE_SERVICE_ACCOUNT")
 
             if String.IsNullOrWhiteSpace(json) then
-                failwith "FIREBASE_SERVICE_ACCOUNT env variable not set"
+                false
+            else
+                let credential = GoogleCredential.FromJson(json)
+                FirebaseApp.Create(
+                    AppOptions(
+                        Credential = credential
+                    )
+                ) |> ignore
 
-            let credential =
-                GoogleCredential.FromJson(json)
-
-            FirebaseApp.Create(
-                AppOptions(
-                    Credential = credential
-                )
-            )
-            |> ignore
+                firebaseInitialized <- true
+                true
+        else
+            true
 
     [<EntryPoint>]
     let main args =
-        // ---- BUILD WEB APP ----
         let builder = WebApplication.CreateBuilder(args)
 
         builder.Services.AddRouting() |> ignore
 
         let app = builder.Build()
 
-        // ---- INIT FIREBASE ----
-        initFirebase ()
-
-        // ---- ROUTES ----
+        // ---------- ROUTES ----------
 
         app.MapGet("/", Func<string>(fun () ->
-            "AuthServer running OK"
+            "AuthServer running"
         )) |> ignore
 
-        // Verify Firebase ID Token
-        app.MapPost("/verify", Func<HttpContext, Threading.Tasks.Task>(fun ctx ->
-            task {
-                let! body = JsonDocument.ParseAsync(ctx.Request.Body)
-                let token =
-                    body.RootElement.GetProperty("token").GetString()
+        app.MapPost("/verify",
+            Func<HttpContext, Threading.Tasks.Task>(fun ctx ->
+                task {
+                    if not (tryInitFirebase ()) then
+                        ctx.Response.StatusCode <- 500
+                        do! ctx.Response.WriteAsync("Firebase not configured")
+                    else
+                        let! body = JsonDocument.ParseAsync(ctx.Request.Body)
+                        let token =
+                            body.RootElement.GetProperty("token").GetString()
 
-                let! decoded =
-                    FirebaseAuth.DefaultInstance.VerifyIdTokenAsync(token)
+                        let! decoded =
+                            FirebaseAuth.DefaultInstance.VerifyIdTokenAsync(token)
 
-                let response =
-                    {| uid = decoded.Uid |}
+                        let result =
+                            {| uid = decoded.Uid |}
 
-                ctx.Response.ContentType <- "application/json"
-                do! ctx.Response.WriteAsync(
-                    JsonSerializer.Serialize(response)
-                )
-            }
-        )) |> ignore
+                        ctx.Response.ContentType <- "application/json"
+                        do! ctx.Response.WriteAsync(
+                            JsonSerializer.Serialize(result)
+                        )
+                }
+            )
+        ) |> ignore
 
-        // ---- RUN ----
         app.Run()
         0
