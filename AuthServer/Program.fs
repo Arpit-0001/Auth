@@ -17,7 +17,7 @@ type OAuthRequest =
       version: string
       nonce: string
       [<JsonPropertyName("sig")>]
-      sig: string }
+      ``sig``: string }
 
 // ================= APP =================
 
@@ -77,7 +77,7 @@ app.MapPost(
                 let raw = req.id + req.hwid + req.version + req.nonce
                 let expectedSig = computeHmac raw
 
-                if not (String.Equals(expectedSig, req.sig, StringComparison.OrdinalIgnoreCase)) then
+                if not (String.Equals(expectedSig, req.``sig``, StringComparison.OrdinalIgnoreCase)) then
                     ctx.Response.StatusCode <- 401
                     do! ctx.Response.WriteAsync("""{"success":false,"error":"Invalid signature"}""")
                 else
