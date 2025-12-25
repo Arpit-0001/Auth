@@ -4,96 +4,70 @@ open System.Text.Json
 open Microsoft.AspNetCore.Builder
 open Microsoft.AspNetCore.Http
 open Microsoft.Extensions.Hosting
-open Microsoft.Extensions.DependencyInjection
-open System.Threading.Tasks
 
-// ------------------ MODELS ------------------
-
-type OAuthRequest =
-    { id: string }
-
-type ApiResponse =
-    { success: bool
-      app: JsonElement
-      user: JsonElement option
-      error: string option }
-
-// ------------------ APP SETUP ------------------
-
-let builder = WebApplication.CreateBuilder()
-
-builder.Services.AddRouting() |> ignore
-builder.Services.AddEndpointsApiExplorer() |> ignore
-
-let app = builder.Build()
-
-// ⭐ REQUIRED — fixes 404
-app.UseRouting()
-
-// ------------------ ENV ------------------
+// ---------------- CONFIG ----------------
 
 let firebaseDbUrl =
     Environment.GetEnvironmentVariable("FIREBASE_DB_URL")
 
-if String.IsNullOrWhiteSpace(firebaseDbUrl) then
-    failwith "FIREBASE_DB_URL environment variable not set"
+// DO NOT CRASH THE APP
+let firebaseDbUrl =
+    if String.IsNullOrWhiteSpace(firebaseDbUrl) then
+        ""
+    else firebaseDbUrl.TrimEnd('/')
 
-// ------------------ HTTP ------------------
+// ---------------- APP ----------------
 
-let httpClient = new HttpClient()
+let builder = WebApplication.CreateBuilder()
+let app = builder.Build()
+
+let http = new HttpClient()
 
 let getJson (url: string) =
     task {
-        let! response = httpClient.GetAsync(url)
-        let! body = response.Content.ReadAsStringAsync()
-        return JsonDocument.Parse(body).RootElement
+        let! res = http.GetAsync(url)
+        let! txt = res.Content.ReadAsStringAsync()
+        return JsonDocument.Parse(txt).RootElement
     }
 
-// ------------------ ENDPOINT ------------------
+// ---------------- ROOT (TEST) ----------------
 
-app.MapPost(
-    "/hmx/oauth",
-    Func<HttpContext, Task>(fun ctx ->
-        task {
-            try
-                let! req =
-                    JsonSerializer.DeserializeAsync<OAuthRequest>(
-                        ctx.Request.Body,
-                        JsonSerializerOptions(PropertyNameCaseInsensitive = true)
-                    )
+app.MapGet("/", fun () ->
+    Results.Ok("AuthServer running")
+) |> ignore
 
-                if isNull req || String.IsNullOrWhiteSpace(req.id) then
-                    ctx.Response.StatusCode <- 400
-                    do! ctx.Response.WriteAsJsonAsync(
-                        {| success = false; error = "Invalid ID" |}
-                    )
-                else
-                    let! appJson =
-                        getJson($"{firebaseDbUrl}/app.json")
+// ---------------- API ----------------
 
-                    let! userJson =
-                        getJson($"{firebaseDbUrl}/users/{req.id}.json")
+app.MapPost("/hmx/oauth", fun (ctx: HttpContext) ->
+    task {
+        try
+            let! body =
+                JsonSerializer.DeserializeAsync<JsonElement>(ctx.Request.Body)
 
-                    let userExists =
-                        userJson.ValueKind <> JsonValueKind.Null
-
-                    let response: ApiResponse =
-                        { success = userExists
-                          app = appJson
-                          user =
-                              if userExists then Some userJson else None
-                          error =
-                              if userExists then None
-                              else Some "User not found" }
-
-                    do! ctx.Response.WriteAsJsonAsync(response)
-            with ex ->
-                ctx.Response.StatusCode <- 500
-                do! ctx.Response.WriteAsJsonAsync(
-                    {| success = false; error = ex.Message |}
+            if not (body.TryGetProperty("id") |> fst) then
+                return Results.BadRequest(
+                    {| success = false; error = "id missing" |}
                 )
-        }
-    )
+            else
+                let id = body.GetProperty("id").GetString()
+
+                let! appJson =
+                    getJson($"{firebaseDbUrl}/app.json")
+
+                let! userJson =
+                    getJson($"{firebaseDbUrl}/users/{id}.json")
+
+                let exists =
+                    userJson.ValueKind <> JsonValueKind.Null
+
+                return Results.Ok(
+                    {| success = exists
+                       app = appJson
+                       user = if exists then userJson else null |}
+                )
+        with ex ->
+            return Results.Problem(ex.Message)
+    }
 ) |> ignore
 
 app.Run()
