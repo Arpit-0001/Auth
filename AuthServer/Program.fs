@@ -7,7 +7,6 @@ open System.Security.Cryptography
 open Microsoft.AspNetCore.Builder
 open Microsoft.AspNetCore.Http
 open Microsoft.Extensions.Hosting
-open System.Threading.Tasks
 
 // ================= MODELS =================
 
@@ -17,7 +16,7 @@ type OAuthRequest =
       version: string
       nonce: string
       [<JsonPropertyName("sig")>]
-      signature: string }
+      sig: string }
 
 // ================= APP =================
 
@@ -29,7 +28,7 @@ let app = builder.Build()
 let firebaseDbUrl =
     match Environment.GetEnvironmentVariable("FIREBASE_DB_URL") with
     | null | "" -> failwith "FIREBASE_DB_URL not set"
-    | v -> v.TrimEnd('/')
+    | v -> v
 
 // ================= SECURITY =================
 
@@ -39,91 +38,70 @@ let computeHmac (input: string) =
     use hmac = new HMACSHA256(Encoding.UTF8.GetBytes(SECRET_KEY))
     hmac.ComputeHash(Encoding.UTF8.GetBytes(input))
     |> Convert.ToHexString
-    |> fun s -> s.ToLowerInvariant()
+    |> fun x -> x.ToLowerInvariant()
 
 // ================= HTTP =================
 
 let http = new HttpClient()
 
-let getJson (url: string) : Task<JsonElement> =
-    task {
-        let! res = http.GetAsync(url)
-        let! txt = res.Content.ReadAsStringAsync()
+let getJsonAsync (url: string) =
+    async {
+        let! res = http.GetAsync(url) |> Async.AwaitTask
+        let! txt = res.Content.ReadAsStringAsync() |> Async.AwaitTask
         return JsonDocument.Parse(txt).RootElement
     }
 
 // ================= HEALTH =================
 
-app.MapGet(
-    "/",
-    Func<IResult>(fun () ->
-        Results.Text("AuthServer running")
-    )
+app.MapGet("/", fun () ->
+    Results.Text("AuthServer running")
 ) |> ignore
 
 // ================= API =================
 
-app.MapPost(
-    "/hmx/oauth",
-    Func<HttpContext, Task<IResult>>(fun ctx ->
-        task {
-            try
-                let! req =
-                    JsonSerializer.DeserializeAsync<OAuthRequest>(
-                        ctx.Request.Body,
-                        JsonSerializerOptions(PropertyNameCaseInsensitive = true)
-                    )
+app.MapPost("/hmx/oauth", fun (ctx: HttpContext) ->
+    async {
+        try
+            let! req =
+                JsonSerializer.DeserializeAsync<OAuthRequest>(
+                    ctx.Request.Body,
+                    JsonSerializerOptions(PropertyNameCaseInsensitive = true)
+                )
+                |> Async.AwaitTask
 
-                // ---- Field validation ----
-                if String.IsNullOrWhiteSpace(req.id)
-                   || String.IsNullOrWhiteSpace(req.hwid)
-                   || String.IsNullOrWhiteSpace(req.version)
-                   || String.IsNullOrWhiteSpace(req.nonce)
-                   || String.IsNullOrWhiteSpace(req.signature) then
+            if isNull req then
+                return Results.BadRequest("Invalid JSON")
 
-                    return
-                        Results.Json(
-                            {| success = false; error = "Missing fields" |},
-                            statusCode = 400
-                        )
+            let raw = $"{req.id}{req.hwid}{req.nonce}"
+            let expectedSig = computeHmac raw
 
-                // ---- HMAC verification ----
-                let raw = req.id + req.hwid + req.version + req.nonce
-                let expectedSig = computeHmac raw
-
-                if not (expectedSig = req.signature.ToLowerInvariant()) then
-                    return
-                        Results.Json(
-                            {| success = false; error = "Invalid signature" |},
-                            statusCode = 401
-                        )
-
-                // ---- Firebase ----
-                let! appJson = getJson($"{firebaseDbUrl}/app.json")
-                let! userJson = getJson($"{firebaseDbUrl}/users/{req.id}.json")
+            if expectedSig <> req.sig.ToLowerInvariant() then
+                return Results.Json(
+                    {| success = false; error = "Invalid signature" |},
+                    statusCode = 401
+                )
+            else
+                let! appJson = getJsonAsync $"{firebaseDbUrl}/app.json"
+                let! userJson = getJsonAsync $"{firebaseDbUrl}/users/{req.id}.json"
 
                 if userJson.ValueKind = JsonValueKind.Null then
-                    return
-                        Results.Json(
-                            {| success = false; error = "User not found" |},
-                            statusCode = 404
-                        )
-
-                // ---- SUCCESS ----
-                return
-                    Results.Ok(
+                    return Results.Json(
+                        {| success = false; error = "User not found" |},
+                        statusCode = 404
+                    )
+                else
+                    return Results.Ok(
                         {| success = true
                            app = appJson
                            user = userJson |}
                     )
-            with ex ->
-                return
-                    Results.Json(
-                        {| success = false; error = ex.Message |},
-                        statusCode = 500
-                    )
-        }
-    )
+        with ex ->
+            return Results.Json(
+                {| success = false; error = ex.Message |},
+                statusCode = 500
+            )
+    }
+    |> Async.StartAsTask
 ) |> ignore
 
 // ================= RUN =================
