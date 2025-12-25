@@ -7,6 +7,7 @@ open System.Security.Cryptography
 open Microsoft.AspNetCore.Builder
 open Microsoft.AspNetCore.Http
 open Microsoft.Extensions.Hosting
+open System.Threading.Tasks
 
 // ================= MODELS =================
 
@@ -16,7 +17,7 @@ type OAuthRequest =
       version: string
       nonce: string
       [<JsonPropertyName("sig")>]
-      sigValue: string }
+      sig: string }
 
 // ================= APP =================
 
@@ -56,55 +57,46 @@ let getJson (url: string) =
 
 // ================= HEALTH =================
 
-app.MapGet("/", fun () ->
-    "AuthServer running"
-) |> ignore
+app.MapGet("/", fun () -> "AuthServer running") |> ignore
 
 // ================= API =================
 
 app.MapPost(
     "/hmx/oauth",
-    RequestDelegate(fun ctx ->
+    fun (ctx: HttpContext) ->
         task {
             ctx.Response.ContentType <- "application/json"
 
             try
-                let! reqOpt =
-                    JsonSerializer.DeserializeAsync<OAuthRequest option>(
+                let! req =
+                    JsonSerializer.DeserializeAsync<OAuthRequest>(
                         ctx.Request.Body,
                         JsonSerializerOptions(PropertyNameCaseInsensitive = true)
                     )
 
-                match reqOpt with
-                | None ->
-                    ctx.Response.StatusCode <- 400
-                    do! ctx.Response.WriteAsync("""{"success":false,"error":"Invalid JSON"}""")
+                let raw = req.id + req.hwid + req.version + req.nonce
+                let expectedSig = computeHmac raw
 
-                | Some req ->
-                    let raw = req.id + req.hwid + req.version + req.nonce
-                    let expectedSig = computeHmac raw
+                if not (String.Equals(expectedSig, req.sig, StringComparison.OrdinalIgnoreCase)) then
+                    ctx.Response.StatusCode <- 401
+                    do! ctx.Response.WriteAsync("""{"success":false,"error":"Invalid signature"}""")
+                else
+                    let! appJson = getJson $"{firebaseDbUrl}/app.json"
+                    let! userJson = getJson $"{firebaseDbUrl}/users/{req.id}.json"
 
-                    if not (String.Equals(expectedSig, req.sigValue, StringComparison.OrdinalIgnoreCase)) then
-                        ctx.Response.StatusCode <- 401
-                        do! ctx.Response.WriteAsync("""{"success":false,"error":"Invalid signature"}""")
+                    if userJson.ValueKind = JsonValueKind.Null then
+                        ctx.Response.StatusCode <- 404
+                        do! ctx.Response.WriteAsync("""{"success":false,"error":"User not found"}""")
                     else
-                        let! appJson = getJson $"{firebaseDbUrl}/app.json"
-                        let! userJson = getJson $"{firebaseDbUrl}/users/{req.id}.json"
+                        let response =
+                            JsonSerializer.Serialize(
+                                {| success = true
+                                   app = appJson
+                                   user = userJson |}
+                            )
 
-                        if userJson.ValueKind = JsonValueKind.Null then
-                            ctx.Response.StatusCode <- 404
-                            do! ctx.Response.WriteAsync("""{"success":false,"error":"User not found"}""")
-                        else
-                            let response =
-                                JsonSerializer.Serialize(
-                                    {| success = true
-                                       app = appJson
-                                       user = userJson |}
-                                )
-
-                            ctx.Response.StatusCode <- 200
-                            do! ctx.Response.WriteAsync(response)
-
+                        ctx.Response.StatusCode <- 200
+                        do! ctx.Response.WriteAsync(response)
             with ex ->
                 ctx.Response.StatusCode <- 500
                 do! ctx.Response.WriteAsync(
@@ -112,8 +104,7 @@ app.MapPost(
                         {| success = false; error = ex.Message |}
                     )
                 )
-        }
-    )
+        } :> Task
 ) |> ignore
 
 // ================= RUN =================
