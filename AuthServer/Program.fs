@@ -1,94 +1,82 @@
-namespace AuthServer
-
 open System
+open System.IO
 open System.Text.Json
-open System.Threading.Tasks
 open Microsoft.AspNetCore.Builder
+open Microsoft.AspNetCore.Hosting
 open Microsoft.AspNetCore.Http
 open Microsoft.Extensions.Hosting
-
+open Microsoft.Extensions.DependencyInjection
 open FirebaseAdmin
 open Google.Apis.Auth.OAuth2
-open Google.Cloud.Firestore
+open FirebaseAdmin.Auth
 
-// --------------------
-// Models
-// --------------------
+let initializeFirebase () =
+    let json = Environment.GetEnvironmentVariable("FIREBASE_SERVICE_ACCOUNT")
+    if String.IsNullOrEmpty(json) then
+        failwith "FIREBASE_SERVICE_ACCOUNT environment variable is required."
 
-type AuthRequest =
-    { accountId: string
-      hwid: string }
+    let credential = GoogleCredential.FromJson(json)
+    let options = AppOptions(Credential = credential)
+    if FirebaseApp.DefaultInstance = null then
+        FirebaseApp.Create(options) |> ignore
+    else
+        printfn "FirebaseApp already initialized."
 
-// --------------------
-// Firebase Init
-// --------------------
+[<EntryPoint>]
+let main args =
+    initializeFirebase ()
 
-module Firebase =
+    let builder = WebApplication.CreateBuilder(args)
 
-    let init () =
-        if FirebaseApp.DefaultInstance = null then
-            let json = Environment.GetEnvironmentVariable("FIREBASE_SERVICE_ACCOUNT")
+    // Add services
+    builder.Services.AddEndpointsApiExplorer() |> ignore
+    builder.Services.AddSwaggerGen() |> ignore
 
-            if String.IsNullOrWhiteSpace(json) then
-                failwith "FIREBASE_SERVICE_ACCOUNT not set"
+    let app = builder.Build()
 
-            let credential = GoogleCredential.FromJson(json)
+    // Swagger in development (optional, helpful for testing)
+    if app.Environment.IsDevelopment() then
+        app.UseSwagger() |> ignore
+        app.UseSwaggerUI() |> ignore
 
-            let options = AppOptions()
-            options.Credential <- credential
+    app.UseHttpsRedirection() |> ignore
 
-            FirebaseApp.Create(options) |> ignore
+    // POST /verify - Verify Firebase ID Token
+    app.MapPost("/verify", Func<HttpContext, Task<IResult>>(fun context ->
+        task {
+            try
+                use reader = new StreamReader(context.Request.Body)
+                let! body = reader.ReadToEndAsync()
 
-// --------------------
-// Program
-// --------------------
+                if String.IsNullOrWhiteSpace(body) then
+                    return Results.BadRequest({| error = "Request body is empty" |})
 
-module Program =
+                let jsonDoc = JsonDocument.Parse(body)
+                if not (jsonDoc.RootElement.TryGetProperty("idToken", &let prop) && prop.ValueKind = JsonValueKind.String then
+                    return Results.BadRequest({| error = "idToken is required in JSON body" |})
 
-    [<EntryPoint>]
-    let main args =
+                let idToken = jsonDoc.RootElement.GetProperty("idToken").GetString()
 
-        Firebase.init()
+                let! decodedToken = FirebaseAuth.DefaultInstance.VerifyIdTokenAsync(idToken)
 
-        let builder = WebApplication.CreateBuilder(args)
-        let app = builder.Build()
+                let response =
+                    {|
+                        uid = decodedToken.Uid
+                        email = decodedToken.Claims.TryGetValue("email") |> function true, (:? string as e) -> e | _ -> null
+                        email_verified = decodedToken.Claims.TryGetValue("email_verified") |> function true, (:? bool as v) -> v | _ -> false
+                        verified = true
+                    |}
 
-        let projectId =
-            FirebaseApp.DefaultInstance.Options.ProjectId
+                return Results.Ok(response)
+            with
+            | :? FirebaseAuthException as ex ->
+                return Results.Unauthorized() |> fun r -> r.Value <- {| error = ex.Message; verified = false |}; r
+            | ex ->
+                return Results.StatusCode(500) |> fun r -> r.Value <- {| error = ex.Message |}; r
+        }
+    ))
+    |> ignore
 
-        let db = FirestoreDb.Create(projectId)
+    app.Run()
 
-        let authHandler : RequestDelegate =
-            RequestDelegate(fun ctx ->
-                task {
-
-                    let! body =
-                        JsonSerializer.DeserializeAsync<AuthRequest>(ctx.Request.Body)
-
-                    // ---- App config ----
-                    let! appSnap =
-                        db.Collection("app").Document("config").GetSnapshotAsync()
-
-                    // ---- User ----
-                    let! userSnap =
-                        db.Collection("users").Document(body.accountId).GetSnapshotAsync()
-
-                    if not userSnap.Exists then
-                        ctx.Response.StatusCode <- 401
-                        do! ctx.Response.WriteAsync("Unauthorized")
-                    else
-                        let appJson = appSnap.ToDictionary() |> JsonSerializer.Serialize
-                        let userJson = userSnap.ToDictionary() |> JsonSerializer.Serialize
-
-                        let response =
-                            $"{{\"app\":{appJson},\"user\":{userJson}}}"
-
-                        ctx.Response.ContentType <- "application/json"
-                        do! ctx.Response.WriteAsync(response)
-                }
-            )
-
-        app.MapPost("/auth", authHandler) |> ignore
-
-        app.Run()
-        0
+    0
