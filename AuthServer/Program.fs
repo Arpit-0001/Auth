@@ -82,6 +82,8 @@ app.MapPost(
                 let raw = req.id + req.hwid + req.version + req.nonce
                 let expectedSig = computeHmac raw
 
+                printfn "RAW=%s EXPECTED=%s GOT=%s" raw expectedSig req.signature
+
                 if not (String.Equals(expectedSig, req.``sig``, StringComparison.OrdinalIgnoreCase)) then
                     ctx.Response.StatusCode <- 401
                     do! ctx.Response.WriteAsync("""{"success":false,"error":"Invalid signature"}""")
