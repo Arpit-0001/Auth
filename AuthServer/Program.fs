@@ -68,28 +68,30 @@ app.MapGet("/", Func<IResult>(fun () ->
 
 // ================= API =================
 
-app.MapPost(
-    "/hmx/oauth",
-    Func<HttpContext, Task<IResult>>(fun ctx ->
-        async {
+open Microsoft.AspNetCore.Http.Json
+
+app.MapPost("/hmx/oauth",
+    Func<HttpContext, Threading.Tasks.Task<IResult>>(fun ctx ->
+        task {
             try
-                let! req =
-                    ctx.Request.ReadFromJsonAsync<OAuthRequest>()
-                    |> Async.AwaitTask
+                // ✅ FIX 1: ReadFromJsonAsync returns ValueTask
+                let! req = ctx.Request.ReadFromJsonAsync<OAuthRequest>()
+
+                if isNull req then
+                    return Results.BadRequest(
+                        {| success = false; error = "Invalid request body" |}
+                    )
 
                 // ===== HMAC =====
                 let raw = req.id + req.hwid + req.version + req.nonce
                 let expectedSig = computeHmac raw
 
-                if expectedSig <> req.sig_ then
-                    return Results.Json(
-                        {| success = false; error = "Invalid signature" |},
-                        statusCode = 401
-                    )
+                if not (expectedSig.Equals(req.sig_, StringComparison.OrdinalIgnoreCase)) then
+                    return Results.Unauthorized()
 
                 let now = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
 
-                // ===== HWID =====
+                // ===== HWID CHECK =====
                 let hwidPath = $"{firebaseDbUrl}/hwid_attempts/{req.hwid}.json"
                 let! hwidJson = getJson hwidPath
 
@@ -97,71 +99,63 @@ app.MapPost(
                 let mutable banUntil = 0L
 
                 if hwidJson.ValueKind <> JsonValueKind.Null then
-                    let mutable countProp = Unchecked.defaultof<JsonElement>
-                    let mutable banProp = Unchecked.defaultof<JsonElement>
+                    let mutable c = Unchecked.defaultof<JsonElement>
+                    let mutable b = Unchecked.defaultof<JsonElement>
 
-                    if hwidJson.TryGetProperty("count", &countProp) then
-                        attempts <- countProp.GetInt32()
+                    if hwidJson.TryGetProperty("count", &c) then
+                        attempts <- c.GetInt32()
 
-                    if hwidJson.TryGetProperty("banUntil", &banProp) then
-                        banUntil <- banProp.GetInt64()
-
+                    if hwidJson.TryGetProperty("banUntil", &b) then
+                        banUntil <- b.GetInt64()
 
                 if banUntil > now then
-                    return Results.Json(
-                        {| success = false
-                           reason = "HWID_BANNED"
-                           retryAfter = banUntil - now |},
-                        statusCode = 403
+                    return Results.StatusCode(
+                        StatusCodes.Status403Forbidden,
+                        {| success = false; reason = "HWID_BANNED"; retryAfter = banUntil - now |}
                     )
 
-                // ===== VERSION =====
+                // ===== VERSION CHECK =====
                 let! appJson = getJson $"{firebaseDbUrl}/app.json"
                 let serverVersion = appJson.GetProperty("version").GetString()
 
                 if req.version <> serverVersion then
-                    return Results.Json(
-                        {| success = false
-                           reason = "VERSION_MISMATCH"
-                           requiredVersion = serverVersion |},
-                        statusCode = 426
+                    return Results.StatusCode(
+                        StatusCodes.Status426UpgradeRequired,
+                        {| success = false; reason = "VERSION_MISMATCH"; requiredVersion = serverVersion |}
                     )
 
-                // ===== USER =====
+                // ===== USER CHECK =====
                 let! userJson = getJson $"{firebaseDbUrl}/users/{req.id}.json"
 
                 if userJson.ValueKind = JsonValueKind.Null then
-                    let newAttempts = attempts + 1
-                    let banTime = if newAttempts >= 3 then now + 86400L else 0L
+                    attempts <- attempts + 1
+                    let ban = if attempts >= 3 then now + 86400L else 0L
 
                     do!
                         putJson hwidPath
-                            {| count = newAttempts
-                               banUntil = banTime |}
+                            {| count = attempts
+                               lastFail = now
+                               banUntil = ban |}
 
-                    return Results.Json(
+                    return Results.Unauthorized(
                         {| success = false
                            error = "Invalid ID"
-                           attemptsLeft = max 0 (3 - newAttempts) |},
-                        statusCode = 401
+                           attemptsLeft = max 0 (3 - attempts) |}
                     )
 
                 // ===== SUCCESS =====
-                let! _ = http.DeleteAsync(hwidPath) |> Async.AwaitTask
+                do! http.DeleteAsync(hwidPath)
 
                 return Results.Ok(
-                    {| success = true |}
+                    {| success = true
+                       user = userJson |}
                 )
-
             with ex ->
-                return Results.Json(
-                    {| success = false; error = ex.Message |},
-                    statusCode = 500
-                )
+                return Results.Problem(ex.Message)
         }
-        |> Async.StartAsTask
     )
 ) |> ignore
+
 
 // ================= RUN =================
 
