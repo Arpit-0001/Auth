@@ -1,72 +1,109 @@
 open System
 open System.Net.Http
+open System.Text
 open System.Text.Json
+open System.Security.Cryptography
 open Microsoft.AspNetCore.Builder
 open Microsoft.AspNetCore.Http
 open Microsoft.Extensions.Hosting
+open Microsoft.Extensions.DependencyInjection
 
-// ---------------- CONFIG ----------------
+// ================= MODELS =================
+
+type OAuthRequest =
+    { id: string
+      hwid: string
+      version: string
+      nonce: string
+      sig: string }
+
+// ================= APP SETUP =================
+
+let builder = WebApplication.CreateBuilder()
+builder.Services.AddRouting() |> ignore
+
+let app = builder.Build()
+
+// ================= ENV =================
 
 let firebaseDbUrl =
     Environment.GetEnvironmentVariable("FIREBASE_DB_URL")
-    |> fun v -> if String.IsNullOrWhiteSpace(v) then "" else v.TrimEnd('/')
 
-// ---------------- APP ----------------
+if String.IsNullOrWhiteSpace(firebaseDbUrl) then
+    failwith "FIREBASE_DB_URL environment variable not set"
 
-let builder = WebApplication.CreateBuilder()
-let app = builder.Build()
+// ================= SECURITY =================
 
-let http = new HttpClient()
+let SECRET = "HMX_SUPER_SECRET_2025"
+
+let computeHmac (data: string) =
+    use hmac = new HMACSHA256(Encoding.UTF8.GetBytes(SECRET))
+    hmac.ComputeHash(Encoding.UTF8.GetBytes(data))
+    |> Convert.ToHexString
+
+// ================= HTTP =================
+
+let httpClient = new HttpClient()
 
 let getJson (url: string) =
     task {
-        let! res = http.GetAsync(url)
-        let! txt = res.Content.ReadAsStringAsync()
-        return JsonDocument.Parse(txt).RootElement
+        let! response = httpClient.GetAsync(url)
+        let! body = response.Content.ReadAsStringAsync()
+        return JsonDocument.Parse(body).RootElement
     }
 
-// ---------------- ROOT ----------------
+// ================= ROOT (Health Check) =================
 
-app.MapGet(
-    "/",
-    Func<IResult>(fun () ->
-        Results.Ok("AuthServer running")
-    )
-) |> ignore
+app.MapGet("/", Func<string>(fun () ->
+    "AuthServer running"
+)) |> ignore
 
-// ---------------- POST /hmx/oauth ----------------
+// ================= API =================
 
-app.MapPost(
-    "/hmx/oauth",
-    RequestDelegate(fun ctx ->
+app.MapPost("/hmx/oauth",
+    Func<HttpContext, Threading.Tasks.Task>(fun ctx ->
         task {
             try
-                let! body =
-                    JsonSerializer.DeserializeAsync<JsonElement>(ctx.Request.Body)
+                let! req =
+                    JsonSerializer.DeserializeAsync<OAuthRequest>(
+                        ctx.Request.Body,
+                        JsonSerializerOptions(PropertyNameCaseInsensitive = true)
+                    )
 
-                if not (body.TryGetProperty("id") |> fst) then
+                if isNull req then
                     ctx.Response.StatusCode <- 400
                     do! ctx.Response.WriteAsJsonAsync(
-                        {| success = false; error = "id missing" |}
+                        {| success = false; error = "Invalid request body" |}
                     )
                 else
-                    let id = body.GetProperty("id").GetString()
+                    // ---- HMAC VERIFICATION ----
+                    let rawData = req.id + req.hwid + req.nonce
+                    let expectedSig = computeHmac rawData
 
-                    let! appJson =
-                        getJson($"{firebaseDbUrl}/app.json")
+                    if not (expectedSig.Equals(req.sig, StringComparison.OrdinalIgnoreCase)) then
+                        ctx.Response.StatusCode <- 401
+                        do! ctx.Response.WriteAsJsonAsync(
+                            {| success = false; error = "Invalid signature" |}
+                        )
+                    else
+                        // ---- FIREBASE FETCH ----
+                        let! appJson =
+                            getJson($"{firebaseDbUrl}/app.json")
 
-                    let! userJson =
-                        getJson($"{firebaseDbUrl}/users/{id}.json")
+                        let! userJson =
+                            getJson($"{firebaseDbUrl}/users/{req.id}.json")
 
-                    let exists =
-                        userJson.ValueKind <> JsonValueKind.Null
-
-                    do! ctx.Response.WriteAsJsonAsync(
-                        {| success = exists
-                           app = appJson
-                           user =
-                               if exists then box userJson else null |}
-                    )
+                        if userJson.ValueKind = JsonValueKind.Null then
+                            ctx.Response.StatusCode <- 404
+                            do! ctx.Response.WriteAsJsonAsync(
+                                {| success = false; error = "User not found" |}
+                            )
+                        else
+                            do! ctx.Response.WriteAsJsonAsync(
+                                {| success = true
+                                   app = appJson
+                                   user = userJson |}
+                            )
             with ex ->
                 ctx.Response.StatusCode <- 500
                 do! ctx.Response.WriteAsJsonAsync(
@@ -75,5 +112,7 @@ app.MapPost(
         }
     )
 ) |> ignore
+
+// ================= RUN =================
 
 app.Run()
