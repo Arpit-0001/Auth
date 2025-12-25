@@ -1,101 +1,119 @@
+namespace AuthServer
+
 open System
-open System.IO
 open System.Text.Json
+open System.Threading.Tasks
 open Microsoft.AspNetCore.Builder
 open Microsoft.AspNetCore.Http
 open Microsoft.Extensions.Hosting
-open Microsoft.Extensions.DependencyInjection
 open Microsoft.Extensions.Logging
 open FirebaseAdmin
 open Google.Apis.Auth.OAuth2
-open FirebaseAdmin.Auth
+open Google.Cloud.Firestore
 
-let tryInitializeFirebase (logger: ILogger) =
-    let json = Environment.GetEnvironmentVariable("FIREBASE_SERVICE_ACCOUNT")
-    if String.IsNullOrWhiteSpace(json) then
-        logger.LogCritical("FIREBASE_SERVICE_ACCOUNT is EMPTY or MISSING! Fix the env var.")
-        false
-    else
-        try
-            logger.LogInformation("Attempting to parse Firebase service account JSON...")
-            let credential = GoogleCredential.FromJson(json)
-            let options = AppOptions(Credential = credential)
-            if FirebaseApp.DefaultInstance <> null then
-                FirebaseApp.Delete(FirebaseApp.DefaultInstance)
-            FirebaseApp.Create(options) |> ignore
-            logger.LogInformation("Firebase Admin SDK initialized SUCCESSFULLY!")
-            true
-        with ex ->
-            logger.LogCritical(ex, "INVALID Firebase JSON or credentials! Check the env var value – it must be the FULL service account JSON.")
-            false
+// --------------------
+// Models
+// --------------------
+type AuthRequest =
+    { accountId: string
+      hwid: string }
 
-[<EntryPoint>]
-let main args =
-    let builder = WebApplication.CreateBuilder(args)
+// --------------------
+// Firebase Init (Safe)
+// --------------------
+module Firebase =
 
-    // Enable detailed console logging
-    builder.Logging.AddConsole() |> ignore
-    builder.Logging.SetMinimumLevel(LogLevel.Information) |> ignore
+    let tryInit (logger: ILogger) =
+        let json = Environment.GetEnvironmentVariable("FIREBASE_SERVICE_ACCOUNT")
 
-    builder.Services.AddEndpointsApiExplorer() |> ignore
-    builder.Services.AddSwaggerGen() |> ignore
-
-    let app = builder.Build()
-    let logger = app.Logger
-
-    let firebaseReady = tryInitializeFirebase logger
-
-    if app.Environment.IsDevelopment() then
-        app.UseSwagger() |> ignore
-        app.UseSwaggerUI() |> ignore
-
-    app.UseHttpsRedirection() |> ignore
-
-    // Root health check – visit your URL to see if alive
-    app.MapGet("/", fun () ->
-        if firebaseReady then
-            "Firebase Auth API running! Firebase OK. POST to /verify with {\"idToken\": \"...\"}"
+        if String.IsNullOrWhiteSpace(json) then
+            logger.LogCritical("FIREBASE_SERVICE_ACCOUNT is missing or empty! Server will run but /auth will fail.")
+            None
         else
-            "API running but Firebase FAILED – check logs!"
-    ) |> ignore
-
-    // Verify endpoint
-    app.MapPost("/verify", Func<HttpContext, Task<IResult>>(fun context ->
-        task {
             try
-                use reader = new StreamReader(context.Request.Body)
-                let! body = reader.ReadToEndAsync()
-                if String.IsNullOrWhiteSpace(body) then
-                    return Results.BadRequest({| error = "Empty body" |})
+                logger.LogInformation("Initializing Firebase with service account...")
+                let credential = GoogleCredential.FromJson(json)
+                let options = AppOptions(Credential = credential)
 
-                let doc = JsonDocument.Parse(body)
-                if not (doc.RootElement.TryGetProperty("idToken")) then
-                    return Results.BadRequest({| error = "Missing idToken" |})
+                if FirebaseApp.DefaultInstance <> null then
+                    FirebaseApp.Delete(FirebaseApp.DefaultInstance)
 
-                let idToken = doc.RootElement.GetProperty("idToken").GetString()
+                let app = FirebaseApp.Create(options)
+                logger.LogInformation("Firebase initialized successfully. Project ID: {ProjectId}", app.Options.ProjectId)
+                Some app
+            with ex ->
+                logger.LogCritical(ex, "Failed to initialize Firebase – INVALID JSON or credentials! Check FIREBASE_SERVICE_ACCOUNT value.")
+                None
 
-                if not firebaseReady then
-                    return Results.StatusCode(500) |> fun r -> r.Value <- {| error = "Firebase init failed – check server logs" |}; r
+// --------------------
+// Program
+// --------------------
+module Program =
 
-                let! decoded = FirebaseAuth.DefaultInstance.VerifyIdTokenAsync(idToken)
+    [<EntryPoint>]
+    let main args =
 
-                return Results.Ok({|
-                    uid = decoded.Uid
-                    email = if decoded.Claims.ContainsKey("email") then decoded.Claims["email"] :?> string else null
-                    email_verified = if decoded.Claims.ContainsKey("email_verified") then decoded.Claims["email_verified"] :?> bool else false
-                    verified = true
-                |})
-            with
-            | :? FirebaseAuthException as ex ->
-                logger.LogWarning(ex, "Invalid token")
-                return Results.Unauthorized() |> fun r -> r.Value <- {| error = ex.Message; verified = false |}; r
-            | ex ->
-                logger.LogError(ex, "Unexpected error")
-                return Results.StatusCode(500) |> fun r -> r.Value <- {| error = "Server error" |}; r
-        }
-    )) |> ignore
+        let builder = WebApplication.CreateBuilder(args)
 
-    logger.LogInformation("Starting API on port {Port}...", Environment.GetEnvironmentVariable("PORT") ?? "80")
-    app.Run()
+        // Better logging
+        builder.Logging.AddConsole() |> ignore
 
-    0
+        let app = builder.Build()
+        let logger = app.Logger
+
+        let firebaseAppOpt = Firebase.tryInit logger
+
+        let getDb () =
+            match firebaseAppOpt with
+            | Some firebaseApp ->
+                let projectId = firebaseApp.Options.ProjectId
+                Some (FirestoreDb.Create(projectId))
+            | None -> None
+
+        // Health check root
+        app.MapGet("/", fun () ->
+            if firebaseAppOpt.IsSome then
+                "Auth API running! Firebase OK. POST to /auth"
+            else
+                "API running but Firebase FAILED – check logs!"
+        ) |> ignore
+
+        // Your original /auth endpoint (with safety)
+        app.MapPost("/auth", Func<HttpContext, Task<IResult>>(fun ctx ->
+            task {
+                try
+                    use reader = new StreamReader(ctx.Request.Body)
+                    let! bodyStr = reader.ReadToEndAsync()
+
+                    if String.IsNullOrWhiteSpace(bodyStr) then
+                        return Results.BadRequest("Empty body")
+
+                    let request = JsonSerializer.Deserialize<AuthRequest>(bodyStr)
+
+                    match getDb() with
+                    | None ->
+                        return Results.StatusCode(500) |> fun r -> r.Value <- "Firebase not initialized"; r
+                    | Some db ->
+                        let! appSnap = db.Collection("app").Document("config").GetSnapshotAsync()
+
+                        let! userSnap = db.Collection("users").Document(request.accountId).GetSnapshotAsync()
+
+                        if not userSnap.Exists then
+                            return Results.Unauthorized() |> fun r -> r.Value <- "Unauthorized"; r
+                        else
+                            let appJson = JsonSerializer.Serialize(appSnap.ToDictionary())
+                            let userJson = JsonSerializer.Serialize(userSnap.ToDictionary())
+
+                            let response = {| app = JsonDocument.Parse(appJson).RootElement; user = JsonDocument.Parse(userJson).RootElement |}
+
+                            return Results.Ok(response)
+                with ex ->
+                    logger.LogError(ex, "Error in /auth handler")
+                    return Results.StatusCode(500) |> fun r -> r.Value <- "Server error"; r
+            }
+        )) |> ignore
+
+        logger.LogInformation("Auth API starting...")
+        app.Run()
+
+        0
