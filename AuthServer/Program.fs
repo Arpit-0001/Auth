@@ -16,19 +16,20 @@ let app = builder.Build()
 
 let http = new HttpClient()
 
+// Helper function for GET requests (returning JSON)
 let getJson (url: string) =
-    task {
-        let! res = http.GetAsync(url)
-        let! txt = res.Content.ReadAsStringAsync()
+    async {
+        let! res = http.GetAsync(url) |> Async.AwaitTask
+        let! txt = res.Content.ReadAsStringAsync() |> Async.AwaitTask
         return JsonDocument.Parse(txt).RootElement
     }
 
+// Helper function for PUT requests (sending JSON)
 let putJson (url: string) (body: obj) =
-    task {
+    async {
         let json = JsonSerializer.Serialize(body)
         let content = new StringContent(json, System.Text.Encoding.UTF8, "application/json")
-        let! _ = http.PutAsync(url, content)
-        return ()
+        do! http.PutAsync(url, content) |> Async.AwaitTask
     }
 
 // ---------------- ROOT ----------------
@@ -43,10 +44,10 @@ app.MapGet(
 app.MapPost(
     "/hmx/oauth",
     RequestDelegate(fun ctx ->
-        task {
+        async {
             try
                 let! body =
-                    JsonSerializer.DeserializeAsync<JsonElement>(ctx.Request.Body)
+                    JsonSerializer.DeserializeAsync<JsonElement>(ctx.Request.Body) |> Async.AwaitTask
 
                 // Check if 'id' property is provided in the request
                 if not (body.TryGetProperty("id") |> fst) then
