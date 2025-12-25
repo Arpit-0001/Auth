@@ -32,7 +32,10 @@ let firebaseDbUrl =
 
 // ================= SECURITY =================
 
-let SECRET_KEY = "HMX_BY_MR_ARPIT_120"
+let SECRET_KEY =
+    match Environment.GetEnvironmentVariable("SECRET_KEY") with
+    | null | "" -> "HMX_BY_MR_ARPIT_120"   // fallback
+    | v -> v
 
 let computeHmac (input: string) =
     use hmac = new HMACSHA256(Encoding.UTF8.GetBytes(SECRET_KEY))
@@ -61,7 +64,7 @@ app.MapGet("/", fun () ->
 
 app.MapPost(
     "/hmx/oauth",
-    fun (ctx: HttpContext) ->
+    RequestDelegate(fun ctx ->
         task {
             try
                 let! req =
@@ -70,35 +73,49 @@ app.MapPost(
                         JsonSerializerOptions(PropertyNameCaseInsensitive = true)
                     )
 
+                if isNull req then
+                    return! Results.BadRequest("Invalid JSON").ExecuteAsync(ctx)
+
                 let raw = req.id + req.hwid + req.version + req.nonce
                 let expectedSig = computeHmac raw
 
                 if not (String.Equals(expectedSig, req.sigValue, StringComparison.OrdinalIgnoreCase)) then
-                    return Results.Json(
-                        {| success = false; error = "Invalid signature" |},
-                        statusCode = 401
-                    )
-                else
-                    let! appJson = getJson $"{firebaseDbUrl}/app.json"
-                    let! userJson = getJson $"{firebaseDbUrl}/users/{req.id}.json"
+                    let res =
+                        Results.Json(
+                            {| success = false; error = "Invalid signature" |},
+                            statusCode = 401
+                        )
+                    return! res.ExecuteAsync(ctx)
 
-                    if userJson.ValueKind = JsonValueKind.Null then
-                        return Results.Json(
+                let! appJson = getJson $"{firebaseDbUrl}/app.json"
+                let! userJson = getJson $"{firebaseDbUrl}/users/{req.id}.json"
+
+                if userJson.ValueKind = JsonValueKind.Null then
+                    let res =
+                        Results.Json(
                             {| success = false; error = "User not found" |},
                             statusCode = 404
                         )
-                    else
-                        return Results.Ok(
-                            {| success = true
-                               app = appJson
-                               user = userJson |}
-                        )
+                    return! res.ExecuteAsync(ctx)
+
+                let res =
+                    Results.Ok(
+                        {| success = true
+                           app = appJson
+                           user = userJson |}
+                    )
+
+                return! res.ExecuteAsync(ctx)
+
             with ex ->
-                return Results.Json(
-                    {| success = false; error = ex.Message |},
-                    statusCode = 500
-                )
+                let res =
+                    Results.Json(
+                        {| success = false; error = ex.Message |},
+                        statusCode = 500
+                    )
+                return! res.ExecuteAsync(ctx)
         }
+    )
 ) |> ignore
 
 // ================= RUN =================
