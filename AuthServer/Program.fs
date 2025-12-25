@@ -67,90 +67,66 @@ app.MapGet("/", fun () ->
 
 // ================= API =================
 
-app.MapPost("/hmx/oauth",
-    Func<HttpContext, Threading.Tasks.Task<IResult>>(fun ctx ->
+open Microsoft.AspNetCore.Http
+open Microsoft.AspNetCore.Builder
+open Microsoft.Extensions.Hosting
+open Microsoft.Extensions.DependencyInjection
+open System.Text.Json
+open System.Threading.Tasks
+
+app.MapPost("/login",
+    Func<HttpContext, Task<IResult>>(fun ctx ->
         task {
-            try
-                let! req = ctx.Request.ReadFromJsonAsync<OAuthRequest>()
 
-                // ===== HMAC =====
-                let raw = req.id + req.hwid + req.version + req.nonce
-                let expectedSig = computeHmac raw
-
-                if expectedSig <> req.sig_ then
-                    return Results.Unauthorized()
-
-                let now = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
-
-                // ===== HWID =====
-                let hwidPath = $"{firebaseDbUrl}/hwid_attempts/{req.hwid}.json"
-                let! hwidJson = getJson hwidPath
-
-                let mutable attempts = 0
-                let mutable banUntil = 0L
-
-                if hwidJson.ValueKind <> JsonValueKind.Null then
-                    let mutable countProp = Unchecked.defaultof<JsonElement>
-                    let mutable banProp = Unchecked.defaultof<JsonElement>
-                
-                    if hwidJson.TryGetProperty("count", &countProp) then
-                        attempts <- countProp.GetInt32()
-                
-                    if hwidJson.TryGetProperty("banUntil", &banProp) then
-                        banUntil <- banProp.GetInt64()
-
-
-                if banUntil > now then
-                    return Results.Json(
-                        {| success = false
-                           reason = "HWID_BANNED"
-                           retryAfter = banUntil - now |},
-                        statusCode = StatusCodes.Status403Forbidden
-                    )
-
-                // ===== VERSION =====
-                let! appJson = getJson $"{firebaseDbUrl}/app.json"
-                let serverVersion = appJson.GetProperty("version").GetString()
-
-                if req.version <> serverVersion then
-                    return Results.Json(
-                        {| success = false
-                           reason = "VERSION_MISMATCH"
-                           requiredVersion = serverVersion |},
-                        statusCode = StatusCodes.Status426UpgradeRequired
-                    )
-
-                // ===== USER =====
-                let! userJson = getJson $"{firebaseDbUrl}/users/{req.id}.json"
-
-                if userJson.ValueKind = JsonValueKind.Null then
-                    attempts <- attempts + 1
-                    let ban = if attempts >= 3 then now + 86400L else 0L
-
-                    do! putJson hwidPath
-                        {| count = attempts
-                           lastFail = now
-                           banUntil = ban |}
-
-                    return Results.Json(
-                        {| success = false
-                           error = "Invalid ID"
-                           attemptsLeft = max 0 (3 - attempts) |},
-                        statusCode = StatusCodes.Status401Unauthorized
-                    )
-
-                // ===== SUCCESS =====
-                let! _ = http.DeleteAsync(hwidPath)
-
-                return Results.Ok(
-                    {| success = true
-                       user = userJson |}
+            let! body =
+                JsonSerializer.DeserializeAsync<LoginRequest>(
+                    ctx.Request.Body,
+                    JsonSerializerOptions(PropertyNameCaseInsensitive = true)
                 )
-            with ex ->
-                return Results.Problem(ex.Message)
+
+            let hwid = body.hwid
+            let version = body.version
+
+            // ---- VERSION CHECK ----
+            if version <> ServerConfig.RequiredVersion then
+                return Results.Json(
+                    {| success = false
+                       reason = "update_required"
+                       requiredVersion = ServerConfig.RequiredVersion |},
+                    statusCode = 426
+                )
+
+            // ---- HWID CHECK ----
+            let state = getHwidState hwid
+
+            if state.banUntil > DateTimeOffset.UtcNow.ToUnixTimeSeconds() then
+                return Results.Json(
+                    {| success = false
+                       reason = "banned"
+                       retryAfter = state.banUntil |},
+                    statusCode = 403
+                )
+
+            if body.password <> ServerConfig.Password then
+                let updated = incrementFail hwid state
+                if updated.count >= 3 then
+                    banHwid hwid
+                return Results.Json(
+                    {| success = false
+                       reason = "invalid_credentials"
+                       attemptsLeft = max 0 (3 - updated.count) |},
+                    statusCode = 401
+                )
+
+            resetFails hwid
+
+            return Results.Ok(
+                {| success = true |}
+            )
         }
     )
-) |> ignore
+)
+
 
 // ================= RUN =================
 
