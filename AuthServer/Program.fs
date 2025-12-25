@@ -1,77 +1,88 @@
-namespace AuthServer
-
 open System
+open System.Net.Http
+open System.Text
 open System.Text.Json
 open Microsoft.AspNetCore.Builder
 open Microsoft.AspNetCore.Http
 open Microsoft.Extensions.Hosting
 open Microsoft.Extensions.DependencyInjection
 
-open FirebaseAdmin
-open FirebaseAdmin.Auth
-open Google.Apis.Auth.OAuth2
+// ---------- Models ----------
+type OAuthRequest =
+    { id: string }
 
-module Program =
+type ApiResponse =
+    { success: bool
+      app: JsonElement
+      user: JsonElement option
+      error: string option }
 
-    let mutable firebaseInitialized = false
+// ---------- App ----------
+let builder = WebApplication.CreateBuilder()
+builder.Services.AddRouting()
+builder.Services.AddEndpointsApiExplorer()
 
-    let tryInitFirebase () =
-        if not firebaseInitialized then
-            let json = Environment.GetEnvironmentVariable("FIREBASE_SERVICE_ACCOUNT")
+let app = builder.Build()
 
-            if String.IsNullOrWhiteSpace(json) then
-                false
+let firebaseDbUrl =
+    Environment.GetEnvironmentVariable("FIREBASE_DB_URL")
+
+if String.IsNullOrWhiteSpace(firebaseDbUrl) then
+    failwith "FIREBASE_DB_URL environment variable not set"
+
+// ---------- Helpers ----------
+let httpClient = new HttpClient()
+
+let getJson (url: string) =
+    task {
+        let! res = httpClient.GetAsync(url)
+        let! body = res.Content.ReadAsStringAsync()
+        return JsonDocument.Parse(body).RootElement
+    }
+
+// ---------- Endpoint ----------
+app.MapPost("/hmx/oauth", fun (ctx: HttpContext) ->
+    task {
+        try
+            let! req =
+                JsonSerializer.DeserializeAsync<OAuthRequest>(
+                    ctx.Request.Body,
+                    JsonSerializerOptions(PropertyNameCaseInsensitive = true)
+                )
+
+            if isNull req || String.IsNullOrWhiteSpace(req.id) then
+                ctx.Response.StatusCode <- 400
+                do! ctx.Response.WriteAsJsonAsync(
+                    {| success = false; error = "Invalid ID" |}
+                )
             else
-                let credential = GoogleCredential.FromJson(json)
-                FirebaseApp.Create(
-                    AppOptions(
-                        Credential = credential
-                    )
-                ) |> ignore
+                // Fetch app config
+                let! appJson =
+                    getJson($"{firebaseDbUrl}/app.json")
 
-                firebaseInitialized <- true
-                true
-        else
-            true
+                // Fetch user
+                let! userJson =
+                    getJson($"{firebaseDbUrl}/users/{req.id}.json")
 
-    [<EntryPoint>]
-    let main args =
-        let builder = WebApplication.CreateBuilder(args)
+                let userExists =
+                    userJson.ValueKind <> JsonValueKind.Null
 
-        builder.Services.AddRouting() |> ignore
+                let response =
+                    { success = userExists
+                      app = appJson
+                      user =
+                          if userExists then Some userJson else None
+                      error =
+                          if userExists then None
+                          else Some "User not found" }
 
-        let app = builder.Build()
-
-        // ---------- ROUTES ----------
-
-        app.MapGet("/", Func<string>(fun () ->
-            "AuthServer running"
-        )) |> ignore
-
-        app.MapPost("/verify",
-            Func<HttpContext, Threading.Tasks.Task>(fun ctx ->
-                task {
-                    if not (tryInitFirebase ()) then
-                        ctx.Response.StatusCode <- 500
-                        do! ctx.Response.WriteAsync("Firebase not configured")
-                    else
-                        let! body = JsonDocument.ParseAsync(ctx.Request.Body)
-                        let token =
-                            body.RootElement.GetProperty("token").GetString()
-
-                        let! decoded =
-                            FirebaseAuth.DefaultInstance.VerifyIdTokenAsync(token)
-
-                        let result =
-                            {| uid = decoded.Uid |}
-
-                        ctx.Response.ContentType <- "application/json"
-                        do! ctx.Response.WriteAsync(
-                            JsonSerializer.Serialize(result)
-                        )
-                }
+                do! ctx.Response.WriteAsJsonAsync(response)
+        with ex
+            ctx.Response.StatusCode <- 500
+            do! ctx.Response.WriteAsJsonAsync(
+                {| success = false; error = ex.Message |}
             )
-        ) |> ignore
+    }
+)
 
-        app.Run()
-        0
+app.Run()
