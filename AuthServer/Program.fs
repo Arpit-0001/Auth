@@ -26,10 +26,9 @@ let app = builder.Build()
 // ================= ENV =================
 
 let firebaseDbUrl =
-    Environment.GetEnvironmentVariable("FIREBASE_DB_URL")
-
-if String.IsNullOrWhiteSpace(firebaseDbUrl) then
-    failwith "FIREBASE_DB_URL not set"
+    match Environment.GetEnvironmentVariable("FIREBASE_DB_URL") with
+    | null | "" -> failwith "FIREBASE_DB_URL not set"
+    | v -> v
 
 // ================= SECURITY =================
 
@@ -64,37 +63,35 @@ app.MapPost(
     Func<HttpContext, Threading.Tasks.Task<IResult>>(fun ctx ->
         task {
             try
-                let! body =
+                let! req =
                     JsonSerializer.DeserializeAsync<OAuthRequest>(
                         ctx.Request.Body,
                         JsonSerializerOptions(PropertyNameCaseInsensitive = true)
                     )
 
-                // ---- HMAC VERIFY ----
-                let raw = body.id + body.hwid + body.nonce
-                let expected = computeHmac raw
+                let raw = req.id + req.hwid + req.nonce
+                let expectedSig = computeHmac raw
 
-                if not (expected.Equals(body.signature, StringComparison.OrdinalIgnoreCase)) then
+                if not (expectedSig.Equals(req.signature, StringComparison.OrdinalIgnoreCase)) then
                     return Results.Json(
                         {| success = false; error = "Invalid signature" |},
                         statusCode = 401
                     )
+                else
+                    let! appJson = getJson($"{firebaseDbUrl}/app.json")
+                    let! userJson = getJson($"{firebaseDbUrl}/users/{req.id}.json")
 
-                // ---- FIREBASE ----
-                let! appJson = getJson($"{firebaseDbUrl}/app.json")
-                let! userJson = getJson($"{firebaseDbUrl}/users/{body.id}.json")
-
-                if userJson.ValueKind = JsonValueKind.Null then
-                    return Results.Json(
-                        {| success = false; error = "User not found" |},
-                        statusCode = 404
-                    )
-
-                return Results.Ok(
-                    {| success = true
-                       app = appJson
-                       user = userJson |}
-                )
+                    if userJson.ValueKind = JsonValueKind.Null then
+                        return Results.Json(
+                            {| success = false; error = "User not found" |},
+                            statusCode = 404
+                        )
+                    else
+                        return Results.Ok(
+                            {| success = true
+                               app = appJson
+                               user = userJson |}
+                        )
             with ex ->
                 return Results.Json(
                     {| success = false; error = ex.Message |},
