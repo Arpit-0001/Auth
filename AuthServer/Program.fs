@@ -57,7 +57,12 @@ let getJson (url: string) =
 
 // ================= HEALTH =================
 
-app.MapGet("/", fun () -> "AuthServer running") |> ignore
+app.MapGet(
+    "/",
+    fun (ctx: HttpContext) ->
+        ctx.Response.WriteAsync("AuthServer running")
+) |> ignore
+
 
 // ================= API =================
 
