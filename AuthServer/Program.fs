@@ -46,17 +46,17 @@ let computeHmac (input: string) =
 let http = new HttpClient()
 
 let getJson (url: string) =
-    task {
-        let! res = http.GetAsync(url)
-        let! txt = res.Content.ReadAsStringAsync()
+    async {
+        let! res = http.GetAsync(url) |> Async.AwaitTask
+        let! txt = res.Content.ReadAsStringAsync() |> Async.AwaitTask
         return JsonDocument.Parse(txt).RootElement
     }
 
 let putJson (url: string) (body: obj) =
-    task {
+    async {
         let json = JsonSerializer.Serialize(body)
         let content = new StringContent(json, Encoding.UTF8, "application/json")
-        let! _ = http.PutAsync(url, content)
+        let! _ = http.PutAsync(url, content) |> Async.AwaitTask
         return ()
     }
 
@@ -71,15 +71,17 @@ app.MapGet("/", Func<IResult>(fun () ->
 app.MapPost(
     "/hmx/oauth",
     Func<HttpContext, Task<IResult>>(fun ctx ->
-        task {
+        async {
             try
-                let! req = ctx.Request.ReadFromJsonAsync<OAuthRequest>()
+                let! req =
+                    ctx.Request.ReadFromJsonAsync<OAuthRequest>()
+                    |> Async.AwaitTask
 
                 // ===== HMAC =====
                 let raw = req.id + req.hwid + req.version + req.nonce
                 let expectedSig = computeHmac raw
 
-                if not (expectedSig.Equals(req.sig_, StringComparison.OrdinalIgnoreCase)) then
+                if expectedSig <> req.sig_ then
                     return Results.Json(
                         {| success = false; error = "Invalid signature" |},
                         statusCode = 401
@@ -87,7 +89,7 @@ app.MapPost(
 
                 let now = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
 
-                // ===== HWID ATTEMPTS =====
+                // ===== HWID =====
                 let hwidPath = $"{firebaseDbUrl}/hwid_attempts/{req.hwid}.json"
                 let! hwidJson = getJson hwidPath
 
@@ -95,14 +97,11 @@ app.MapPost(
                 let mutable banUntil = 0L
 
                 if hwidJson.ValueKind <> JsonValueKind.Null then
-                    let mutable c = Unchecked.defaultof<JsonElement>
-                    let mutable b = Unchecked.defaultof<JsonElement>
+                    if hwidJson.TryGetProperty("count", &_) then
+                        attempts <- hwidJson.GetProperty("count").GetInt32()
 
-                    if hwidJson.TryGetProperty("count", &c) then
-                        attempts <- c.GetInt32()
-
-                    if hwidJson.TryGetProperty("banUntil", &b) then
-                        banUntil <- b.GetInt64()
+                    if hwidJson.TryGetProperty("banUntil", &_) then
+                        banUntil <- hwidJson.GetProperty("banUntil").GetInt64()
 
                 if banUntil > now then
                     return Results.Json(
@@ -112,7 +111,7 @@ app.MapPost(
                         statusCode = 403
                     )
 
-                // ===== VERSION CHECK =====
+                // ===== VERSION =====
                 let! appJson = getJson $"{firebaseDbUrl}/app.json"
                 let serverVersion = appJson.GetProperty("version").GetString()
 
@@ -124,7 +123,7 @@ app.MapPost(
                         statusCode = 426
                     )
 
-                // ===== USER CHECK =====
+                // ===== USER =====
                 let! userJson = getJson $"{firebaseDbUrl}/users/{req.id}.json"
 
                 if userJson.ValueKind = JsonValueKind.Null then
@@ -134,7 +133,6 @@ app.MapPost(
                     do!
                         putJson hwidPath
                             {| count = newAttempts
-                               lastFail = now
                                banUntil = banTime |}
 
                     return Results.Json(
@@ -145,11 +143,10 @@ app.MapPost(
                     )
 
                 // ===== SUCCESS =====
-                let! _ = http.DeleteAsync(hwidPath)
+                let! _ = http.DeleteAsync(hwidPath) |> Async.AwaitTask
 
                 return Results.Ok(
-                    {| success = true
-                       user = userJson |}
+                    {| success = true |}
                 )
 
             with ex ->
@@ -158,6 +155,7 @@ app.MapPost(
                     statusCode = 500
                 )
         }
+        |> Async.StartAsTask
     )
 ) |> ignore
 
