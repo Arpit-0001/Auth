@@ -1,105 +1,72 @@
 open System
-open System.Net.Http
-open System.Text
+open System.Collections.Concurrent
 open System.Text.Json
-open System.Text.Json.Serialization
-open System.Security.Cryptography
+open System.Threading.Tasks
 open Microsoft.AspNetCore.Builder
 open Microsoft.AspNetCore.Http
 open Microsoft.Extensions.Hosting
 
-// ================= MODELS =================
+// ---------------- CONFIG ----------------
 
-type OAuthRequest =
-    { id: string
-      hwid: string
+let REQUIRED_VERSION = "1.2.0"
+let PASSWORD = "secret123"
+let MAX_ATTEMPTS = 3
+let BAN_SECONDS = 86400L // 1 day
+
+// ---------------- MODELS ----------------
+
+type LoginRequest =
+    { hwid: string
       version: string
-      nonce: string
-      [<JsonPropertyName("sig")>]
-      sig_: string }
+      password: string }
 
-// ================= APP =================
+// ---------------- STORAGE ----------------
+
+type HwidState =
+    { mutable count: int
+      mutable banUntil: int64 }
+
+let store = ConcurrentDictionary<string, HwidState>()
+
+let unixNow () =
+    DateTimeOffset.UtcNow.ToUnixTimeSeconds()
+
+// ---------------- APP ----------------
 
 let builder = WebApplication.CreateBuilder()
 let app = builder.Build()
-
-// ================= ENV =================
-
-let firebaseDbUrl =
-    match Environment.GetEnvironmentVariable("FIREBASE_DB_URL") with
-    | null | "" -> failwith "FIREBASE_DB_URL not set"
-    | v -> v.TrimEnd('/')
-
-// ================= SECURITY =================
-
-let SECRET_KEY = "HMX_BY_MR_ARPIT_120"
-
-let computeHmac (input: string) =
-    use hmac = new HMACSHA256(Encoding.UTF8.GetBytes(SECRET_KEY))
-    hmac.ComputeHash(Encoding.UTF8.GetBytes(input))
-    |> Array.map (fun b -> b.ToString("x2"))
-    |> String.concat ""
-
-// ================= HTTP =================
-
-let http = new HttpClient()
-
-let getJson (url: string) =
-    task {
-        let! res = http.GetAsync(url)
-        let! txt = res.Content.ReadAsStringAsync()
-        return JsonDocument.Parse(txt).RootElement
-    }
-
-let putJson (url: string) (body: obj) =
-    task {
-        let json = JsonSerializer.Serialize(body)
-        let content = new StringContent(json, Encoding.UTF8, "application/json")
-        let! _ = http.PutAsync(url, content)
-        return ()
-    }
-
-// ================= HEALTH =================
-
-app.MapGet("/", fun () ->
-    Results.Text("AuthServer running")
-) |> ignore
-
-// ================= API =================
-
-open Microsoft.AspNetCore.Http
-open Microsoft.AspNetCore.Builder
-open Microsoft.Extensions.Hosting
-open Microsoft.Extensions.DependencyInjection
-open System.Text.Json
-open System.Threading.Tasks
 
 app.MapPost("/login",
     Func<HttpContext, Task<IResult>>(fun ctx ->
         task {
 
-            let! body =
+            let! req =
                 JsonSerializer.DeserializeAsync<LoginRequest>(
                     ctx.Request.Body,
                     JsonSerializerOptions(PropertyNameCaseInsensitive = true)
                 )
 
-            let hwid = body.hwid
-            let version = body.version
+            if isNull req then
+                return Results.BadRequest()
 
             // ---- VERSION CHECK ----
-            if version <> ServerConfig.RequiredVersion then
+            if req.version <> REQUIRED_VERSION then
                 return Results.Json(
                     {| success = false
                        reason = "update_required"
-                       requiredVersion = ServerConfig.RequiredVersion |},
+                       requiredVersion = REQUIRED_VERSION |},
                     statusCode = 426
                 )
 
-            // ---- HWID CHECK ----
-            let state = getHwidState hwid
+            let state =
+                store.GetOrAdd(
+                    req.hwid,
+                    fun _ -> { count = 0; banUntil = 0L }
+                )
 
-            if state.banUntil > DateTimeOffset.UtcNow.ToUnixTimeSeconds() then
+            // ---- BAN CHECK ----
+            let now = unixNow ()
+            if state.banUntil > now then
                 return Results.Json(
                     {| success = false
                        reason = "banned"
@@ -107,18 +74,22 @@ app.MapPost("/login",
                     statusCode = 403
                 )
 
-            if body.password <> ServerConfig.Password then
-                let updated = incrementFail hwid state
-                if updated.count >= 3 then
-                    banHwid hwid
+            // ---- PASSWORD CHECK ----
+            if req.password <> PASSWORD then
+                state.count <- state.count + 1
+
+                if state.count >= MAX_ATTEMPTS then
+                    state.banUntil <- now + BAN_SECONDS
+
                 return Results.Json(
                     {| success = false
-                       reason = "invalid_credentials"
-                       attemptsLeft = max 0 (3 - updated.count) |},
+                       attemptsLeft = max 0 (MAX_ATTEMPTS - state.count) |},
                     statusCode = 401
                 )
 
-            resetFails hwid
+            // ---- SUCCESS ----
+            state.count <- 0
+            state.banUntil <- 0L
 
             return Results.Ok(
                 {| success = true |}
@@ -126,8 +97,6 @@ app.MapPost("/login",
         }
     )
 )
-
-
-// ================= RUN =================
+|> ignore
 
 app.Run()
