@@ -4,7 +4,6 @@ open System.Text
 open System.Text.Json
 open System.Text.Json.Serialization
 open System.Security.Cryptography
-open System.Threading.Tasks
 open Microsoft.AspNetCore.Builder
 open Microsoft.AspNetCore.Http
 open Microsoft.Extensions.Hosting
@@ -46,52 +45,44 @@ let computeHmac (input: string) =
 let http = new HttpClient()
 
 let getJson (url: string) =
-    async {
-        let! res = http.GetAsync(url) |> Async.AwaitTask
-        let! txt = res.Content.ReadAsStringAsync() |> Async.AwaitTask
+    task {
+        let! res = http.GetAsync(url)
+        let! txt = res.Content.ReadAsStringAsync()
         return JsonDocument.Parse(txt).RootElement
     }
 
 let putJson (url: string) (body: obj) =
-    async {
+    task {
         let json = JsonSerializer.Serialize(body)
         let content = new StringContent(json, Encoding.UTF8, "application/json")
-        let! _ = http.PutAsync(url, content) |> Async.AwaitTask
+        let! _ = http.PutAsync(url, content)
         return ()
     }
 
 // ================= HEALTH =================
 
-app.MapGet("/", Func<IResult>(fun () ->
+app.MapGet("/", fun () ->
     Results.Text("AuthServer running")
-)) |> ignore
+) |> ignore
 
 // ================= API =================
-
-open Microsoft.AspNetCore.Http.Json
 
 app.MapPost("/hmx/oauth",
     Func<HttpContext, Threading.Tasks.Task<IResult>>(fun ctx ->
         task {
             try
-                // ✅ FIX 1: ReadFromJsonAsync returns ValueTask
                 let! req = ctx.Request.ReadFromJsonAsync<OAuthRequest>()
-
-                if isNull req then
-                    return Results.BadRequest(
-                        {| success = false; error = "Invalid request body" |}
-                    )
 
                 // ===== HMAC =====
                 let raw = req.id + req.hwid + req.version + req.nonce
                 let expectedSig = computeHmac raw
 
-                if not (expectedSig.Equals(req.sig_, StringComparison.OrdinalIgnoreCase)) then
+                if expectedSig <> req.sig_ then
                     return Results.Unauthorized()
 
                 let now = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
 
-                // ===== HWID CHECK =====
+                // ===== HWID =====
                 let hwidPath = $"{firebaseDbUrl}/hwid_attempts/{req.hwid}.json"
                 let! hwidJson = getJson hwidPath
 
@@ -99,52 +90,53 @@ app.MapPost("/hmx/oauth",
                 let mutable banUntil = 0L
 
                 if hwidJson.ValueKind <> JsonValueKind.Null then
-                    let mutable c = Unchecked.defaultof<JsonElement>
-                    let mutable b = Unchecked.defaultof<JsonElement>
+                    if hwidJson.TryGetProperty("count", &_) then
+                        attempts <- hwidJson.GetProperty("count").GetInt32()
 
-                    if hwidJson.TryGetProperty("count", &c) then
-                        attempts <- c.GetInt32()
-
-                    if hwidJson.TryGetProperty("banUntil", &b) then
-                        banUntil <- b.GetInt64()
+                    if hwidJson.TryGetProperty("banUntil", &_) then
+                        banUntil <- hwidJson.GetProperty("banUntil").GetInt64()
 
                 if banUntil > now then
-                    return Results.StatusCode(
-                        StatusCodes.Status403Forbidden,
-                        {| success = false; reason = "HWID_BANNED"; retryAfter = banUntil - now |}
+                    return Results.Json(
+                        {| success = false
+                           reason = "HWID_BANNED"
+                           retryAfter = banUntil - now |},
+                        statusCode = StatusCodes.Status403Forbidden
                     )
 
-                // ===== VERSION CHECK =====
+                // ===== VERSION =====
                 let! appJson = getJson $"{firebaseDbUrl}/app.json"
                 let serverVersion = appJson.GetProperty("version").GetString()
 
                 if req.version <> serverVersion then
-                    return Results.StatusCode(
-                        StatusCodes.Status426UpgradeRequired,
-                        {| success = false; reason = "VERSION_MISMATCH"; requiredVersion = serverVersion |}
+                    return Results.Json(
+                        {| success = false
+                           reason = "VERSION_MISMATCH"
+                           requiredVersion = serverVersion |},
+                        statusCode = StatusCodes.Status426UpgradeRequired
                     )
 
-                // ===== USER CHECK =====
+                // ===== USER =====
                 let! userJson = getJson $"{firebaseDbUrl}/users/{req.id}.json"
 
                 if userJson.ValueKind = JsonValueKind.Null then
                     attempts <- attempts + 1
                     let ban = if attempts >= 3 then now + 86400L else 0L
 
-                    do!
-                        putJson hwidPath
-                            {| count = attempts
-                               lastFail = now
-                               banUntil = ban |}
+                    do! putJson hwidPath
+                        {| count = attempts
+                           lastFail = now
+                           banUntil = ban |}
 
-                    return Results.Unauthorized(
+                    return Results.Json(
                         {| success = false
                            error = "Invalid ID"
-                           attemptsLeft = max 0 (3 - attempts) |}
+                           attemptsLeft = max 0 (3 - attempts) |},
+                        statusCode = StatusCodes.Status401Unauthorized
                     )
 
                 // ===== SUCCESS =====
-                do! http.DeleteAsync(hwidPath)
+                let! _ = http.DeleteAsync(hwidPath)
 
                 return Results.Ok(
                     {| success = true
@@ -155,7 +147,6 @@ app.MapPost("/hmx/oauth",
         }
     )
 ) |> ignore
-
 
 // ================= RUN =================
 
