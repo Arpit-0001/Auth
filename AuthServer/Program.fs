@@ -2,11 +2,11 @@ open System
 open System.Net.Http
 open System.Text
 open System.Text.Json
+open System.Text.Json.Serialization
 open System.Security.Cryptography
 open Microsoft.AspNetCore.Builder
 open Microsoft.AspNetCore.Http
 open Microsoft.Extensions.Hosting
-open Microsoft.Extensions.DependencyInjection
 
 // ================= MODELS =================
 
@@ -15,13 +15,12 @@ type OAuthRequest =
       hwid: string
       version: string
       nonce: string
-      sig: string }
+      [<JsonPropertyName("sig")>]
+      signature: string }
 
 // ================= APP SETUP =================
 
 let builder = WebApplication.CreateBuilder()
-builder.Services.AddRouting() |> ignore
-
 let app = builder.Build()
 
 // ================= ENV =================
@@ -47,70 +46,62 @@ let httpClient = new HttpClient()
 
 let getJson (url: string) =
     task {
-        let! response = httpClient.GetAsync(url)
-        let! body = response.Content.ReadAsStringAsync()
+        let! res = httpClient.GetAsync(url)
+        let! body = res.Content.ReadAsStringAsync()
         return JsonDocument.Parse(body).RootElement
     }
 
-// ================= ROOT (Health Check) =================
+// ================= HEALTH =================
 
-app.MapGet("/", Func<string>(fun () ->
-    "AuthServer running"
-)) |> ignore
+app.MapGet("/", fun () ->
+    Results.Text("AuthServer running")
+) |> ignore
 
 // ================= API =================
 
-app.MapPost("/hmx/oauth",
-    Func<HttpContext, Threading.Tasks.Task>(fun ctx ->
-        task {
-            try
-                let! req =
-                    JsonSerializer.DeserializeAsync<OAuthRequest>(
-                        ctx.Request.Body,
-                        JsonSerializerOptions(PropertyNameCaseInsensitive = true)
-                    )
+app.MapPost("/hmx/oauth", fun (ctx: HttpContext) ->
+    task {
+        try
+            let! req =
+                JsonSerializer.DeserializeAsync<OAuthRequest>(
+                    ctx.Request.Body,
+                    JsonSerializerOptions(PropertyNameCaseInsensitive = true)
+                )
 
-                if isNull req then
-                    ctx.Response.StatusCode <- 400
-                    do! ctx.Response.WriteAsJsonAsync(
-                        {| success = false; error = "Invalid request body" |}
+            if isNull req then
+                return Results.BadRequest(
+                    {| success = false; error = "Invalid request body" |}
+                )
+            else
+                // ---- HMAC VERIFY ----
+                let raw = req.id + req.hwid + req.nonce
+                let expected = computeHmac raw
+
+                if not (expected.Equals(req.signature, StringComparison.OrdinalIgnoreCase)) then
+                    return Results.Unauthorized(
+                        {| success = false; error = "Invalid signature" |}
                     )
                 else
-                    // ---- HMAC VERIFICATION ----
-                    let rawData = req.id + req.hwid + req.nonce
-                    let expectedSig = computeHmac rawData
+                    // ---- FIREBASE ----
+                    let! appJson =
+                        getJson($"{firebaseDbUrl}/app.json")
 
-                    if not (expectedSig.Equals(req.sig, StringComparison.OrdinalIgnoreCase)) then
-                        ctx.Response.StatusCode <- 401
-                        do! ctx.Response.WriteAsJsonAsync(
-                            {| success = false; error = "Invalid signature" |}
+                    let! userJson =
+                        getJson($"{firebaseDbUrl}/users/{req.id}.json")
+
+                    if userJson.ValueKind = JsonValueKind.Null then
+                        return Results.NotFound(
+                            {| success = false; error = "User not found" |}
                         )
                     else
-                        // ---- FIREBASE FETCH ----
-                        let! appJson =
-                            getJson($"{firebaseDbUrl}/app.json")
-
-                        let! userJson =
-                            getJson($"{firebaseDbUrl}/users/{req.id}.json")
-
-                        if userJson.ValueKind = JsonValueKind.Null then
-                            ctx.Response.StatusCode <- 404
-                            do! ctx.Response.WriteAsJsonAsync(
-                                {| success = false; error = "User not found" |}
-                            )
-                        else
-                            do! ctx.Response.WriteAsJsonAsync(
-                                {| success = true
-                                   app = appJson
-                                   user = userJson |}
-                            )
-            with ex ->
-                ctx.Response.StatusCode <- 500
-                do! ctx.Response.WriteAsJsonAsync(
-                    {| success = false; error = ex.Message |}
-                )
-        }
-    )
+                        return Results.Ok(
+                            {| success = true
+                               app = appJson
+                               user = userJson |}
+                        )
+        with ex ->
+            return Results.Problem(ex.Message)
+    }
 ) |> ignore
 
 // ================= RUN =================
