@@ -2,16 +2,15 @@
 
   <PropertyGroup>
     <TargetFramework>net6.0</TargetFramework>
-    <OutputType>Exe</OutputType>
+    <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- OTHER FILES FIRST -->
-    <Compile Include="Firebase.fs" />
-    <Compile Include="AuthHandlers.fs" />
-
-    <!-- Program.fs MUST BE LAST -->
     <Compile Include="Program.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="FirebaseAdmin" Version="2.4.0" />
   </ItemGroup>
 
 </Project>
