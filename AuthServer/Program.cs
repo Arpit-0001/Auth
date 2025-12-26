@@ -86,8 +86,28 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
         }
 
         // ---------- HWID POLICY (SERVER ONLY) ----------
-        var policy = user["policy"]!;
-        var hwids = policy["hwids"]!.AsObject();
+        var policy = user["policy"] as JsonObject;
+        if (policy == null)
+        {
+            return Results.Json(new
+            {
+                success = false,
+                reason = "POLICY_MISSING"
+            }, statusCode: 500);
+        }
+        
+        var hwidsNode = policy["hwids"] as JsonObject;
+        if (hwidsNode == null)
+        {
+            return Results.Json(new
+            {
+                success = false,
+                reason = "HWIDS_MISSING"
+            }, statusCode: 500);
+        }
+        
+        var hwids = hwidsNode;
+
 
         bool hwidExists = hwids.Any(x => x.Value!.GetValue<string>() == hwid);
 
