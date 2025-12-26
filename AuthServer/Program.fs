@@ -2,6 +2,7 @@ open System
 open System.Net.Http
 open System.Text
 open System.Text.Json
+open System.Threading.Tasks
 open System.Text.Json.Nodes
 open Microsoft.AspNetCore.Builder
 open Microsoft.AspNetCore.Http
@@ -40,7 +41,7 @@ app.MapGet("/", fun () ->
 // ---------------- POST /hmx/oauth ----------------
 app.MapPost(
     "/hmx/oauth",
-    Func<HttpContext, System.Threading.Tasks.Task>(fun ctx ->
+    Func<HttpContext, Task>(fun ctx ->
         task {
 
             try
@@ -139,7 +140,7 @@ app.MapPost(
                     {| success = false; error = ex.Message |}
                 )
                 return ()
-        }
+        } :> Task
     )
 )
 |> ignore
