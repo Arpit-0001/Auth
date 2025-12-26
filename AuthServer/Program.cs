@@ -134,29 +134,63 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
         }
 
         // ---------- FEATURES ----------
-        var featuresCfg = appCfg["features"]!.AsObject();
-        var featuresOut = new JsonObject();
+ // ---------- HWID POLICY (SERVER ONLY) ----------
+var policy = user["policy"] as JsonObject;
+if (policy == null)
+{
+    return Results.Json(new
+    {
+        success = false,
+        reason = "POLICY_MISSING"
+    }, statusCode: 500);
+}
 
-        foreach (var f in featuresCfg)
+bool hwidLocked = policy["hwid_locked"]?.GetValue<bool>() ?? false;
+var hwids = policy["hwids"] as JsonObject;
+
+// 🔒 Only enforce HWID rules when locked
+if (hwidLocked)
+{
+    if (hwids == null || hwids.Count == 0)
+    {
+        return Results.Json(new
         {
-            bool enabled = f.Value!["enabled"]!.GetValue<bool>();
-            int minVersion = f.Value!["min_version"]!.GetValue<int>();
+            success = false,
+            reason = "HWIDS_MISSING"
+        }, statusCode: 500);
+    }
 
-            var obj = new JsonObject
-            {
-                ["enabled"] = enabled,
-                ["min_version"] = minVersion
-            };
+    bool hwidExists = hwids.Any(x => x.Value!.GetValue<string>() == hwid);
+    if (!hwidExists)
+    {
+        return Results.Json(new
+        {
+            success = false,
+            reason = "HWID_NOT_ALLOWED"
+        }, statusCode: 403);
+    }
+}
+else
+{
+    // 🟢 Not locked → auto-bind HWID if slots exist
+    if (hwids == null)
+        hwids = new JsonObject();
 
-            if (enabled)
-            {
-                foreach (var kv in f.Value!.AsObject())
-                    if (kv.Key.EndsWith("_api_1"))
-                        obj[kv.Key] = kv.Value;
-            }
+    bool hwidExists = hwids.Any(x => x.Value!.GetValue<string>() == hwid);
 
-            featuresOut[f.Key] = obj;
+    if (!hwidExists)
+    {
+        var free = hwids.FirstOrDefault(
+            x => string.IsNullOrEmpty(x.Value!.GetValue<string>())
+        );
+
+        if (free.Key != null)
+        {
+            hwids[free.Key] = hwid;
+            await PutJson($"{firebaseDb}/users/{id}/policy/hwids.json", hwids);
         }
+    }
+}
 
         // ---------- SUCCESS ----------
         return Results.Json(new
