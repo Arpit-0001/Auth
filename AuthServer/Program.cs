@@ -1,111 +1,116 @@
-using System.Text;
 using System.Text.Json;
-using System.Text.Json.Nodes;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Hosting;
 
 var builder = WebApplication.CreateBuilder(args);
 var app = builder.Build();
 
-var http = new HttpClient();
+// ================= CONFIG =================
+const string SERVER_VERSION = "1.0.0";
+const int MAX_ATTEMPTS = 3;
+const int BAN_SECONDS = 86400; // 1 day
 
-string firebaseDbUrl =
-    Environment.GetEnvironmentVariable("FIREBASE_DB_URL")?.TrimEnd('/') ?? "";
+// ================= IN-MEMORY STORE (replace with DB later) =================
+var hwidAttempts = new Dictionary<string, AttemptInfo>();
 
-async Task<JsonNode?> GetJson(string url)
+// ================= MODELS =================
+record AuthRequest(string Id, string Hwid, string Version);
+
+class AttemptInfo
 {
-    var res = await http.GetAsync(url);
-    if (!res.IsSuccessStatusCode) return null;
-    var txt = await res.Content.ReadAsStringAsync();
-    return JsonNode.Parse(txt);
+    public int Count { get; set; }
+    public long BanUntil { get; set; }
 }
 
-async Task PutJson(string url, JsonNode body)
-{
-    var json = body.ToJsonString();
-    var content = new StringContent(json, Encoding.UTF8, "application/json");
-    await http.PutAsync(url, content);
-}
+// ================= ROUTES =================
 
 app.MapGet("/", () => "AuthServer running");
 
-app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
+// ---------- AUTH ----------
+app.MapPost("/auth", async (HttpContext ctx) =>
 {
+    AuthRequest? req;
+
     try
     {
-        using var reader = new StreamReader(ctx.Request.Body);
-        var raw = await reader.ReadToEndAsync();
-        var body = JsonNode.Parse(raw);
-
-        if (body?["id"] == null)
-            return Results.BadRequest(new { success = false, error = "id missing" });
-
-        string id = body["id"]!.GetValue<string>();
-        string hwid = body["hwid"]!.GetValue<string>();
-        double clientVersion = body["version"]!.GetValue<double>();
-
-        // ---- version check ----
-        var appCfg = await GetJson($"{firebaseDbUrl}/app.json");
-        double serverVersion = appCfg!["version"]!.GetValue<double>();
-
-        if (clientVersion != serverVersion)
-        {
-            return Results.StatusCode(426, new
-            {
-                success = false,
-                reason = "VERSION_MISMATCH",
-                requiredVersion = serverVersion
-            });
-        }
-
-        // ---- user ----
-        var user = await GetJson($"{firebaseDbUrl}/users/{id}.json");
-        if (user == null)
-            return Results.Unauthorized();
-
-        // ---- HWID attempts ----
-        var attempt = await GetJson($"{firebaseDbUrl}/hwid_attempts/{hwid}.json");
-        long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-
-        int count = attempt?["count"]?.GetValue<int>() ?? 0;
-        long banUntil = attempt?["banUntil"]?.GetValue<long>() ?? 0;
-
-        if (banUntil > now)
-        {
-            return Results.StatusCode(403, new
-            {
-                success = false,
-                reason = "HWID_BANNED",
-                retryAfter = banUntil - now
-            });
-        }
-
-        if (count >= 3)
-        {
-            long ban = now + 86400;
-            await PutJson(
-                $"{firebaseDbUrl}/hwid_attempts/{hwid}.json",
-                JsonNode.Parse($@"{{ ""count"": {count}, ""lastFail"": {now}, ""banUntil"": {ban} }}")!
-            );
-
-            return Results.StatusCode(403, new
-            {
-                success = false,
-                reason = "HWID_BANNED",
-                retryAfter = 86400
-            });
-        }
-
-        // success
-        await PutJson(
-            $"{firebaseDbUrl}/hwid_attempts/{hwid}.json",
-            JsonNode.Parse($@"{{ ""count"": {count + 1}, ""lastFail"": {now}, ""banUntil"": 0 }}")!
-        );
-
-        return Results.Ok(new { success = true });
+        req = await ctx.Request.ReadFromJsonAsync<AuthRequest>();
     }
-    catch (Exception ex)
+    catch
     {
-        return Results.Problem(ex.Message);
+        return Results.Json(new { error = "Invalid JSON" }, statusCode: 400);
     }
+
+    if (req == null || string.IsNullOrWhiteSpace(req.Hwid))
+        return Results.Json(new { error = "Invalid request" }, statusCode: 400);
+
+    // ---------- VERSION CHECK ----------
+    if (req.Version != SERVER_VERSION)
+    {
+        return Results.Json(new
+        {
+            success = false,
+            reason = "VERSION_MISMATCH",
+            requiredVersion = SERVER_VERSION
+        }, statusCode: 426);
+    }
+
+    var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+    // ---------- HWID CHECK ----------
+    if (!hwidAttempts.TryGetValue(req.Hwid, out var info))
+    {
+        info = new AttemptInfo();
+        hwidAttempts[req.Hwid] = info;
+    }
+
+    if (info.BanUntil > now)
+    {
+        return Results.Json(new
+        {
+            success = false,
+            reason = "HWID_BANNED",
+            retryAfter = info.BanUntil - now
+        }, statusCode: 403);
+    }
+
+    // ---------- AUTH FAIL SIMULATION ----------
+    bool authSuccess = req.Id == "admin"; // replace with real auth
+
+    if (!authSuccess)
+    {
+        info.Count++;
+
+        if (info.Count >= MAX_ATTEMPTS)
+        {
+            info.BanUntil = now + BAN_SECONDS;
+            info.Count = 0;
+
+            return Results.Json(new
+            {
+                success = false,
+                reason = "HWID_BANNED",
+                retryAfter = BAN_SECONDS
+            }, statusCode: 403);
+        }
+
+        return Results.Json(new
+        {
+            success = false,
+            reason = "INVALID_CREDENTIALS",
+            attemptsLeft = MAX_ATTEMPTS - info.Count
+        }, statusCode: 401);
+    }
+
+    // ---------- SUCCESS ----------
+    info.Count = 0;
+    info.BanUntil = 0;
+
+    return Results.Ok(new
+    {
+        success = true,
+        message = "Authenticated"
+    });
 });
 
 app.Run();
