@@ -38,7 +38,10 @@ app.MapGet("/", fun () ->
 ) |> ignore
 
 // ---------------- POST /hmx/oauth ----------------
-app.MapPost("/hmx/oauth", fun (ctx: HttpContext) -> task {
+app.MapPost(
+    "/hmx/oauth",
+    Func<HttpContext, System.Threading.Tasks.Task>(fun ctx ->
+        task {
 
     try
         // Read body
