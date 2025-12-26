@@ -33,6 +33,17 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
         string raw = id + hwid + version + nonce;
         string expectedSig = ComputeHmac(raw);
 
+        Console.WriteLine("---- SIGNATURE DEBUG START ----");
+        Console.WriteLine($"ID      : {id}");
+        Console.WriteLine($"HWID    : {hwid}");
+        Console.WriteLine($"VERSION : {version}");
+        Console.WriteLine($"NONCE   : {nonce}");
+        Console.WriteLine($"RAW     : {raw}");
+        Console.WriteLine($"SIG_IN  : {sig}");
+        Console.WriteLine($"SIG_EXP : {expectedSig}");
+        Console.WriteLine("---- SIGNATURE DEBUG END ----");
+
+
         if (!CryptographicOperations.FixedTimeEquals(
                 Convert.FromHexString(sig),
                 Convert.FromHexString(expectedSig)))
