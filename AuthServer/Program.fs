@@ -45,7 +45,10 @@ app.MapPost(
 
     try
         // Read body
-        let! body = JsonNode.ParseAsync(ctx.Request.Body)
+        use sr = new System.IO.StreamReader(ctx.Request.Body)
+        let! raw = sr.ReadToEndAsync()
+        let body = JsonNode.Parse(raw)
+
 
         if isNull body || isNull body["id"] then
             ctx.Response.StatusCode <- 400
