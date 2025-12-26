@@ -41,7 +41,7 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
             {
                 success = false,
                 reason = "INVALID_SIGNATURE"
-            }, 401);
+            },statusCode: 401);
         }
 
         // ---------- APP ----------
@@ -58,7 +58,7 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
                 success = false,
                 reason = "UPDATE_REQUIRED",
                 requiredVersion = serverVersion
-            }, 426);
+            },statusCode: 426);
         }
 
         // ---------- USER ----------
@@ -69,7 +69,7 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
             {
                 success = false,
                 reason = "INVALID_USER"
-            }, 401);
+            },statusCode: 401);
         }
 
         // ---------- HWID POLICY (SERVER ONLY) ----------
@@ -93,7 +93,7 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
                 {
                     success = false,
                     reason = "HWID_LIMIT_REACHED"
-                }, 403);
+                },statusCode: 403);
             }
 
             hwids[free.Key] = hwid;
@@ -150,7 +150,7 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
         {
             success = false,
             error = ex.Message
-        }, 500);
+        },statusCode: 500);
     }
 });
 
