@@ -135,10 +135,11 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
         {
             featuresOut[f.Key] = new JsonObject
             {
-                ["enabled"] = f.Value!["enabled"],
-                ["min_version"] = f.Value!["min_version"]
+                ["enabled"] = f.Value!["enabled"]!.GetValue<bool>(),
+                ["min_version"] = f.Value!["min_version"]!.GetValue<string>()
             };
         }
+
 
         // ---------- SUCCESS ----------
         return Results.Json(new
