@@ -49,7 +49,7 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
         if (appCfg == null)
             return Results.Json("AuthServer running", statusCode: 200);
 
-        string serverVersion = appCfg["version"]!.ToString().Trim('"');
+        string serverVersion = appCfg["version"]!.GetValue<string>();
 
 
         if (version != serverVersion)
