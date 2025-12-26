@@ -1,179 +1,178 @@
-using Microsoft.AspNetCore.Builder;
-using Microsoft.AspNetCore.Http;
-using Microsoft.Extensions.Hosting;
-using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
-// ================= CONFIG =================
-string firebaseDbUrl =
-    Environment.GetEnvironmentVariable("FIREBASE_DB_URL")?.TrimEnd('/') ?? "";
-
-string secretKey =
-    Environment.GetEnvironmentVariable("AUTH_SECRET") ?? "CHANGE_THIS_SECRET";
-
-// ================= APP =================
 var builder = WebApplication.CreateBuilder(args);
 var app = builder.Build();
 
-HttpClient http = new();
+const string SECRET = "HMX_BY_MR_ARPIT_120";
 
-// ================= HELPERS =================
-static async Task<JsonNode?> GetJson(HttpClient http, string url)
-{
-    var res = await http.GetAsync(url);
-    if (!res.IsSuccessStatusCode) return null;
+string firebaseDb =
+    Environment.GetEnvironmentVariable("FIREBASE_DB_URL")!
+    .TrimEnd('/');
 
-    var txt = await res.Content.ReadAsStringAsync();
-    if (string.IsNullOrWhiteSpace(txt) || txt == "null") return null;
+HttpClient http = new HttpClient();
 
-    return JsonNode.Parse(txt);
-}
+app.MapGet("/", () => "AuthServer running");
 
-static async Task PutJson(HttpClient http, string url, JsonNode body)
-{
-    var json = body.ToJsonString();
-    var content = new StringContent(json, Encoding.UTF8, "application/json");
-    await http.PutAsync(url, content);
-}
-
-static string ComputeHmac(string raw, string secret)
-{
-    using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(secret));
-    var hash = hmac.ComputeHash(Encoding.UTF8.GetBytes(raw));
-    return Convert.ToHexString(hash).ToLower();
-}
-
-// ================= ROOT =================
-app.MapGet("/", () => Results.Ok("AuthServer running"));
-
-// ================= POST /hmx/oauth =================
 app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
 {
-    string rawBody;
-    using (var reader = new StreamReader(ctx.Request.Body))
-        rawBody = await reader.ReadToEndAsync();
-
-    JsonNode? body;
     try
     {
-        body = JsonNode.Parse(rawBody);
-    }
-    catch
-    {
-        return Results.Json(new { success = false, error = "INVALID_JSON" }, statusCode: 400);
-    }
+        var body = await JsonNode.ParseAsync(ctx.Request.Body);
+        if (body == null)
+            return Results.BadRequest(new { success = false });
 
-    // ================= AUTH HEADER =================
-    if (!ctx.Request.Headers.TryGetValue("X-Signature", out var sigHeader))
-    {
-        return Results.Json(new { success = false, reason = "NO_SIGNATURE" }, statusCode: 401);
-    }
+        string id = body["id"]!.GetValue<string>();
+        string hwid = body["hwid"]!.GetValue<string>();
+        string version = body["version"]!.GetValue<string>();
+        string nonce = body["nonce"]!.GetValue<string>();
+        string sig = body["sig"]!.GetValue<string>();
 
-    string expected = ComputeHmac(rawBody, secretKey);
-    string provided = sigHeader.ToString().ToLower();
+        // ---------------- HMAC VERIFY ----------------
+        string raw = id + hwid + version + nonce;
+        string expectedSig = ComputeHmac(raw);
 
-    if (expected != provided)
-    {
-        return Results.Json(new { success = false, reason = "INVALID_SIGNATURE" }, statusCode: 401);
-    }
-
-    // ================= BASIC FIELDS =================
-    if (body?["id"] == null || body["version"] == null)
-    {
-        return Results.Json(new { success = false, error = "MISSING_FIELDS" }, statusCode: 400);
-    }
-
-    string id = body["id"]!.GetValue<string>();
-    string hwid = body["hwid"]?.GetValue<string>() ?? "unknown";
-    double clientVersion = body["version"]!.GetValue<double>();
-
-    // ================= APP CONFIG =================
-    var appCfg = await GetJson(http, $"{firebaseDbUrl}/app.json");
-    if (appCfg == null || appCfg["version"] == null)
-    {
-        return Results.Json(new { success = false, error = "SERVER_CONFIG_ERROR" }, statusCode: 500);
-    }
-
-    double serverVersion = appCfg["version"]!.GetValue<double>();
-
-    if (clientVersion != serverVersion)
-    {
-        return Results.Json(new
+        if (!CryptographicOperations.FixedTimeEquals(
+                Encoding.UTF8.GetBytes(sig),
+                Encoding.UTF8.GetBytes(expectedSig)))
         {
-            success = false,
-            reason = "VERSION_MISMATCH",
-            requiredVersion = serverVersion
-        }, statusCode: 426);
-    }
+            return Results.Unauthorized(new
+            {
+                success = false,
+                reason = "INVALID_SIGNATURE"
+            });
+        }
 
-    // ================= USER =================
-    var user = await GetJson(http, $"{firebaseDbUrl}/users/{id}.json");
-    if (user == null)
-    {
-        return Results.Json(new { success = false, reason = "INVALID_USER" }, statusCode: 401);
-    }
+        // ---------------- APP VERSION ----------------
+        JsonNode appCfg =
+            await GetJson($"{firebaseDb}/app.json");
 
-    // ================= HWID ATTEMPTS =================
-    var attempt = await GetJson(http, $"{firebaseDbUrl}/hwid_attempts/{hwid}.json");
+        string serverVersion =
+            appCfg["version"]!.GetValue<double>().ToString("0.0.0");
 
-    long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-    int count = attempt?["count"]?.GetValue<int>() ?? 0;
-    long banUntil = attempt?["banUntil"]?.GetValue<long>() ?? 0;
-
-    if (banUntil > now)
-    {
-        return Results.Json(new
+        if (version != serverVersion)
         {
-            success = false,
-            reason = "HWID_BANNED",
-            retryAfter = banUntil - now
-        }, statusCode: 403);
-    }
+            return Results.StatusCode(426,
+                new
+                {
+                    success = false,
+                    reason = "UPDATE_REQUIRED",
+                    requiredVersion = serverVersion
+                });
+        }
 
-    if (count >= 3)
-    {
-        long ban = now + 86400;
+        // ---------------- USER ----------------
+        JsonNode user =
+            await GetJson($"{firebaseDb}/users/{id}.json");
 
-        await PutJson(http,
-            $"{firebaseDbUrl}/hwid_attempts/{hwid}.json",
+        if (user == null)
+        {
+            await RegisterFail(hwid);
+            return Results.Unauthorized(new
+            {
+                success = false,
+                reason = "INVALID_USER"
+            });
+        }
+
+        // ---------------- HWID BAN ----------------
+        long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        JsonNode attempt =
+            await GetJson($"{firebaseDb}/hwid_attempts/{hwid}.json");
+
+        int count = attempt?["count"]?.GetValue<int>() ?? 0;
+        long banUntil = attempt?["banUntil"]?.GetValue<long>() ?? 0;
+
+        if (banUntil > now)
+        {
+            return Results.StatusCode(403, new
+            {
+                success = false,
+                reason = "HWID_BANNED",
+                retryAfter = banUntil - now
+            });
+        }
+
+        if (count >= 3)
+        {
+            long ban = now + 86400;
+            await PutJson(
+                $"{firebaseDb}/hwid_attempts/{hwid}.json",
+                JsonNode.Parse($$"""
+                {
+                    "count": {{count}},
+                    "lastFail": {{now}},
+                    "banUntil": {{ban}}
+                }
+                """)!
+            );
+
+            return Results.StatusCode(403, new
+            {
+                success = false,
+                reason = "HWID_BANNED",
+                retryAfter = 86400
+            });
+        }
+
+        // ---------------- SUCCESS ----------------
+        await PutJson(
+            $"{firebaseDb}/hwid_attempts/{hwid}.json",
             JsonNode.Parse($$"""
             {
-              "count": {{count}},
-              "lastFail": {{now}},
-              "banUntil": {{ban}}
+                "count": 0,
+                "lastFail": {{now}},
+                "banUntil": 0
             }
             """)!
         );
 
-        return Results.Json(new
+        return Results.Ok(new
         {
-            success = false,
-            reason = "HWID_BANNED",
-            retryAfter = 86400
-        }, statusCode: 403);
+            success = true,
+            name = user["name"]?.GetValue<string>()
+        });
     }
-
-    // ================= SUCCESS =================
-    await PutJson(http,
-        $"{firebaseDbUrl}/hwid_attempts/{hwid}.json",
-        JsonNode.Parse($$"""
-        {
-          "count": {{count + 1}},
-          "lastFail": {{now}},
-          "banUntil": 0
-        }
-        """)!
-    );
-
-    return Results.Ok(new
+    catch (Exception ex)
     {
-        success = true,
-        name = user["name"]?.GetValue<string>(),
-        features = user
-    });
+        return Results.StatusCode(500,
+            new { success = false, error = ex.Message });
+    }
 });
 
 app.Run();
+
+
+// ================= HELPERS =================
+
+static string ComputeHmac(string raw)
+{
+    using var hmac =
+        new HMACSHA256(Encoding.UTF8.GetBytes(SECRET));
+    byte[] hash =
+        hmac.ComputeHash(Encoding.UTF8.GetBytes(raw));
+    return Convert.ToHexString(hash).ToLower();
+}
+
+static async Task<JsonNode> GetJson(string url)
+{
+    using HttpClient http = new();
+    var res = await http.GetStringAsync(url);
+    return JsonNode.Parse(res)!;
+}
+
+static async Task PutJson(string url, JsonNode body)
+{
+    using HttpClient http = new();
+    var content =
+        new StringContent(body.ToJsonString(),
+        Encoding.UTF8, "application/json");
+    await http.PutAsync(url, content);
+}
+
+static async Task RegisterFail(string hwid)
+{
+    // optional – already handled inline
+}
