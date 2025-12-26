@@ -145,6 +145,7 @@ else
 
         // ---------- FEATURES ----------
  // ---------- HWID POLICY (SERVER ONLY) ----------
+// ---------- HWID POLICY (SERVER ONLY) ----------
 var policy = user["policy"] as JsonObject;
 if (policy == null)
 {
@@ -156,11 +157,9 @@ if (policy == null)
 }
 
 bool hwidLocked = policy["hwid_locked"]?.GetValue<bool>() ?? false;
-
-
 var hwids = policy["hwids"] as JsonObject;
 
-// 🔒 Only enforce HWID rules when locked
+// 🔒 LOCKED → strict validation
 if (hwidLocked)
 {
     if (hwids == null || hwids.Count == 0)
@@ -172,8 +171,8 @@ if (hwidLocked)
         }, statusCode: 500);
     }
 
-    bool hwidExists = hwids.Any(x => x.Value!.GetValue<string>() == hwid);
-    if (!hwidExists)
+    bool allowed = hwids.Any(x => x.Value!.GetValue<string>() == hwid);
+    if (!allowed)
     {
         return Results.Json(new
         {
@@ -184,13 +183,12 @@ if (hwidLocked)
 }
 else
 {
-    // 🟢 Not locked → auto-bind HWID if slots exist
+    // 🟢 NOT LOCKED → auto-bind if slot exists
     if (hwids == null)
         hwids = new JsonObject();
 
-    bool hwidExists = hwids.Any(x => x.Value!.GetValue<string>() == hwid);
-
-    if (!hwidExists)
+    bool exists = hwids.Any(x => x.Value!.GetValue<string>() == hwid);
+    if (!exists)
     {
         var free = hwids.FirstOrDefault(
             x => string.IsNullOrEmpty(x.Value!.GetValue<string>())
@@ -203,6 +201,7 @@ else
         }
     }
 }
+
 
         // ---------- SUCCESS ----------
         return Results.Json(new
