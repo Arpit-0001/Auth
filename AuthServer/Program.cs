@@ -21,7 +21,7 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
         var body = JsonNode.Parse(await reader.ReadToEndAsync());
 
         if (body == null)
-            return Results.Json(new { success = false }, 400);
+            return Results.Json("AuthServer running", statusCode: 200);
 
         string id = body["id"]!.GetValue<string>();
         string hwid = body["hwid"]!.GetValue<string>();
@@ -47,7 +47,7 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
         // ---------- APP ----------
         JsonNode? appCfg = await GetJson($"{firebaseDb}/app.json");
         if (appCfg == null)
-            return Results.Json(new { success = false }, 500);
+            return Results.Json("AuthServer running", statusCode: 200);
 
         string serverVersion = appCfg["version"]!.GetValue<string>();
 
