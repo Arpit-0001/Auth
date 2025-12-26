@@ -194,13 +194,4 @@ static async Task PutJson(string url, JsonNode body)
 }
 
 
-Console.WriteLine("---- SIGNATURE DEBUG START ----");
-Console.WriteLine($"ID      : {id}");
-Console.WriteLine($"HWID    : {hwid}");
-Console.WriteLine($"VERSION : {version}");
-Console.WriteLine($"NONCE   : {nonce}");
-Console.WriteLine($"RAW     : {raw}");
-Console.WriteLine($"SIG_IN  : {sig}");
-Console.WriteLine($"SIG_EXP : {expectedSig}");
-Console.WriteLine("---- SIGNATURE DEBUG END ----");
 
