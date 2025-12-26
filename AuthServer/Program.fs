@@ -129,10 +129,8 @@ app.MapPost(
                                                 $"""{{ "count": {count + 1}, "lastFail": {now}, "banUntil": 0 }}"""
                                             ))
 
-                                    do! ctx.Response.WriteAsJsonAsync(
-                                        {| success = true |}
-                                    )
-                                    return ()
+                                    do! ctx.Response.WriteAsJsonAsync({| success = true |})
+                                    return()
 
             with ex ->
                 ctx.Response.StatusCode <- 500
