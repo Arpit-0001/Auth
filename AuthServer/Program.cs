@@ -86,7 +86,6 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
         }
 
         // ---------- HWID POLICY (SERVER ONLY) ----------
-        var policy = user["policy"] as JsonObject;
         if (policy == null)
         {
             return Results.Json(new
