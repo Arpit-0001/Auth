@@ -38,7 +38,7 @@ app.MapGet("/", fun () ->
 ) |> ignore
 
 // ---------------- POST /hmx/oauth ----------------
-app.MapPost("/hmx/oauth", fun ctx ->
+app.MapPost("/hmx/oauth", RequestDelegate(fun ctx ->
     task {
         try
             use sr = new System.IO.StreamReader(ctx.Request.Body)
@@ -84,9 +84,9 @@ app.MapPost("/hmx/oauth", fun ctx ->
                                    reason = "HWID_BANNED"
                                    retryAfter = banUntil - now |}
                             )
-                        else if count >= 3 then
+                        elif count >= 3 then
                             let ban = now + 86400L
-                            do! putJson
+                            let! _ = putJson
                                 $"{firebaseDbUrl}/hwid_attempts/{hwid}.json"
                                 (JsonNode.Parse($"""{{ "count": {count}, "lastFail": {now}, "banUntil": {ban} }}"""))
                             ctx.Response.StatusCode <- 403
@@ -96,7 +96,7 @@ app.MapPost("/hmx/oauth", fun ctx ->
                                    retryAfter = 86400 |}
                             )
                         else
-                            do! putJson
+                            let! _ = putJson
                                 $"{firebaseDbUrl}/hwid_attempts/{hwid}.json"
                                 (JsonNode.Parse($"""{{ "count": {count + 1}, "lastFail": {now}, "banUntil": 0 }}"""))
                             do! ctx.Response.WriteAsJsonAsync({| success = true |})
@@ -105,7 +105,7 @@ app.MapPost("/hmx/oauth", fun ctx ->
             do! ctx.Response.WriteAsJsonAsync(
                 {| success = false; error = ex.Message |}
             )
-    }
-) |> ignore
+    } :> Task
+)) |> ignore
 
 app.Run()
