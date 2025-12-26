@@ -131,6 +131,11 @@ app.MapPost(
         do! ctx.Response.WriteAsJsonAsync(
             {| success = false; error = ex.Message |}
         )
-})
+
+        }
+    )
+)
+|> ignore
+
 
 app.Run()
