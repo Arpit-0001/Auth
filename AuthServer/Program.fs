@@ -38,7 +38,7 @@ app.MapGet("/", fun () ->
 ) |> ignore
 
 // ---------------- POST /hmx/oauth ----------------
-app.MapPost("/hmx/oauth", RequestDelegate(fun ctx ->
+app.MapPost("/hmx/oauth", Func<HttpContext, Task>(fun ctx ->
     task {
         try
             use sr = new System.IO.StreamReader(ctx.Request.Body)
@@ -50,12 +50,23 @@ app.MapPost("/hmx/oauth", RequestDelegate(fun ctx ->
                 do! ctx.Response.WriteAsJsonAsync(
                     {| success = false; error = "id missing" |}
                 )
+            elif isNull body["hwid"] then
+                ctx.Response.StatusCode <- 400
+                do! ctx.Response.WriteAsJsonAsync(
+                    {| success = false; error = "hwid missing" |}
+                )
+            elif isNull body["version"] then
+                ctx.Response.StatusCode <- 400
+                do! ctx.Response.WriteAsJsonAsync(
+                    {| success = false; error = "version missing" |}
+                )
             else
                 let id = body["id"].GetValue<string>()
                 let hwid = body["hwid"].GetValue<string>()
-                let clientVersion = body.["version"].GetValue<float>()
+                let clientVersion = body["version"].GetValue<float>()
+                
                 let! appCfg = getJson($"{firebaseDbUrl}/app.json")
-                let serverVersion = appCfg.["version"].GetValue<float>()
+                let serverVersion = appCfg["version"].GetValue<float>()
                 
                 if clientVersion <> serverVersion then
                     ctx.Response.StatusCode <- 426
@@ -86,9 +97,9 @@ app.MapPost("/hmx/oauth", RequestDelegate(fun ctx ->
                             )
                         elif count >= 3 then
                             let ban = now + 86400L
-                            let! _ = putJson
-                                $"{firebaseDbUrl}/hwid_attempts/{hwid}.json"
-                                (JsonNode.Parse($"""{{ "count": {count}, "lastFail": {now}, "banUntil": {ban} }}"""))
+                            let banJson = JsonNode.Parse(
+                                $"""{{ "count": {count}, "lastFail": {now}, "banUntil": {ban} }}""")
+                            do! putJson $"{firebaseDbUrl}/hwid_attempts/{hwid}.json" banJson
                             ctx.Response.StatusCode <- 403
                             do! ctx.Response.WriteAsJsonAsync(
                                 {| success = false
@@ -96,9 +107,9 @@ app.MapPost("/hmx/oauth", RequestDelegate(fun ctx ->
                                    retryAfter = 86400 |}
                             )
                         else
-                            let! _ = putJson
-                                $"{firebaseDbUrl}/hwid_attempts/{hwid}.json"
-                                (JsonNode.Parse($"""{{ "count": {count + 1}, "lastFail": {now}, "banUntil": 0 }}"""))
+                            let attemptJson = JsonNode.Parse(
+                                $"""{{ "count": {count + 1}, "lastFail": {now}, "banUntil": 0 }}""")
+                            do! putJson $"{firebaseDbUrl}/hwid_attempts/{hwid}.json" attemptJson
                             do! ctx.Response.WriteAsJsonAsync({| success = true |})
         with ex ->
             ctx.Response.StatusCode <- 500
