@@ -34,8 +34,9 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
         string expectedSig = ComputeHmac(raw);
 
         if (!CryptographicOperations.FixedTimeEquals(
-                Encoding.UTF8.GetBytes(sig),
-                Encoding.UTF8.GetBytes(expectedSig)))
+                Convert.FromHexString(sig),
+                Convert.FromHexString(expectedSig)))
+
         {
             return Results.Json(new
             {
