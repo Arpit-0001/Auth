@@ -7,6 +7,7 @@ open System.Text.Json.Nodes
 open Microsoft.AspNetCore.Builder
 open Microsoft.AspNetCore.Http
 open Microsoft.Extensions.Hosting
+open Microsoft.AspNetCore.Http.Results  // Added for Results types
 
 // ---------------- CONFIG ----------------
 let firebaseDbUrl =
@@ -16,7 +17,6 @@ let firebaseDbUrl =
 // ---------------- APP ----------------
 let builder = WebApplication.CreateBuilder()
 let app = builder.Build()
-
 let http = new HttpClient()
 
 // ---------------- HELPERS (TASK ONLY) ----------------
@@ -41,104 +41,66 @@ app.MapGet("/", fun () ->
 // ---------------- POST /hmx/oauth ----------------
 app.MapPost(
     "/hmx/oauth",
-    Func<HttpContext, Task>(fun ctx ->
+    Func<HttpContext, Task<IResult>>(fun ctx ->
         task {
-
             try
                 use sr = new System.IO.StreamReader(ctx.Request.Body)
                 let! raw = sr.ReadToEndAsync()
                 let body: JsonNode = JsonNode.Parse(raw)
-
                 if isNull body || isNull body["id"] then
-                    ctx.Response.StatusCode <- 400
-                    do! ctx.Response.WriteAsJsonAsync(
-                        {| success = false; error = "id missing" |}
-                    )
-                    return ()
+                    return Results.BadRequest({| success = false; error = "id missing" |})
+
+                let id = body["id"].GetValue<string>()
+                let hwid = body["hwid"].GetValue<string>()
+                let clientVersion = body.["version"].GetValue<float>()
+                let! appCfg = getJson($"{firebaseDbUrl}/app.json") : Task<JsonNode>
+                let serverVersion = appCfg.["version"].GetValue<float>()
+                if clientVersion <> serverVersion then
+                    return Results.StatusCode(426)({| success = false
+                                                       reason = "VERSION_MISMATCH"
+                                                       requiredVersion = serverVersion |})
+
+                let! user = getJson($"{firebaseDbUrl}/users/{id}.json")
+                if isNull user then
+                    return Results.Unauthorized({| success = false; reason = "INVALID_USER" |})
+
+                let! attempt =
+                    getJson($"{firebaseDbUrl}/hwid_attempts/{hwid}.json")
+                    : Task<JsonNode>
+                let now = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
+                let count =
+                    if isNull attempt then 0
+                    else attempt["count"].GetValue<int>()
+                let banUntil =
+                    if isNull attempt then 0L
+                    else attempt["banUntil"].GetValue<int64>()
+                if banUntil > now then
+                    return Results.StatusCode(403)({| success = false
+                                                      reason = "HWID_BANNED"
+                                                      retryAfter = banUntil - now |})
+
+                if count >= 3 then
+                    let ban = now + 86400L
+                    do!
+                        putJson
+                            $"{firebaseDbUrl}/hwid_attempts/{hwid}.json"
+                            (JsonNode.Parse(
+                                $"""{{ "count": {count}, "lastFail": {now}, "banUntil": {ban} }}"""
+                            ))
+                    return Results.StatusCode(403)({| success = false
+                                                      reason = "HWID_BANNED"
+                                                      retryAfter = 86400 |})
                 else
-                    let id = body["id"].GetValue<string>()
-                    let hwid = body["hwid"].GetValue<string>()
-                    let clientVersion = body.["version"].GetValue<float>()
-
-                    let! appCfg = getJson($"{firebaseDbUrl}/app.json") : Task<JsonNode>
-                    let serverVersion = appCfg.["version"].GetValue<float>()
-
-                    if clientVersion <> serverVersion then
-                        ctx.Response.StatusCode <- 426
-                        do! ctx.Response.WriteAsJsonAsync(
-                            {| success = false
-                               reason = "VERSION_MISMATCH"
-                               requiredVersion = serverVersion |}
-                        )
-                        return ()
-                    else
-                        let! user = getJson($"{firebaseDbUrl}/users/{id}.json")
-
-                        if isNull user then
-                            ctx.Response.StatusCode <- 401
-                            do! ctx.Response.WriteAsJsonAsync(
-                                {| success = false; reason = "INVALID_USER" |}
-                            )
-                            return ()
-                        else
-                            let! attempt =
-                                getJson($"{firebaseDbUrl}/hwid_attempts/{hwid}.json")
-                                : Task<JsonNode>
-
-                            let now = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
-
-                            let count =
-                                if isNull attempt then 0
-                                else attempt["count"].GetValue<int>()
-
-
-                            let banUntil =
-                                if isNull attempt then 0L
-                                else attempt["banUntil"].GetValue<int64>()
-
-                            if banUntil > now then
-                                ctx.Response.StatusCode <- 403
-                                do! ctx.Response.WriteAsJsonAsync(
-                                    {| success = false
-                                       reason = "HWID_BANNED"
-                                       retryAfter = banUntil - now |}
-                                )
-                                return ()
-                            else
-                                if count >= 3 then
-                                    let ban = now + 86400L
-                                    do!
-                                        putJson
-                                            $"{firebaseDbUrl}/hwid_attempts/{hwid}.json"
-                                            (JsonNode.Parse(
-                                                $"""{{ "count": {count}, "lastFail": {now}, "banUntil": {ban} }}"""
-                                            ))
-
-                                    ctx.Response.StatusCode <- 403
-                                    do! ctx.Response.WriteAsJsonAsync(
-                                        {| success = false
-                                           reason = "HWID_BANNED"
-                                           retryAfter = 86400 |}
-                                    )
-                                    return ()
-                                else
-                                    do!
-                                        putJson
-                                            $"{firebaseDbUrl}/hwid_attempts/{hwid}.json"
-                                            (JsonNode.Parse(
-                                                $"""{{ "count": {count + 1}, "lastFail": {now}, "banUntil": 0 }}"""
-                                            ))
-
-                                    do! ctx.Response.WriteAsJsonAsync({| success = true |})
-                                    return()
-
+                    do!
+                        putJson
+                            $"{firebaseDbUrl}/hwid_attempts/{hwid}.json"
+                            (JsonNode.Parse(
+                                $"""{{ "count": {count + 1}, "lastFail": {now}, "banUntil": 0 }}"""
+                            ))
+                    return Results.Ok({| success = true |})
             with ex ->
-                ctx.Response.StatusCode <- 500
-                do! ctx.Response.WriteAsJsonAsync(
-                    {| success = false; error = ex.Message |}
-                )
-                return ()
-        } :> Task
+                return Results.Problem({| success = false; error = ex.Message |})
+        } :> Task<IResult>
     )
 )
 |> ignore
