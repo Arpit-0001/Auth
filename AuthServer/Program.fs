@@ -1,3 +1,43 @@
+open System
+open System.Net.Http
+open System.Text
+open System.Text.Json
+open System.Threading.Tasks
+open System.Text.Json.Nodes
+open Microsoft.AspNetCore.Builder
+open Microsoft.AspNetCore.Http
+open Microsoft.Extensions.Hosting
+
+// ---------------- CONFIG ----------------
+let firebaseDbUrl =
+    Environment.GetEnvironmentVariable("FIREBASE_DB_URL")
+    |> fun v -> if String.IsNullOrWhiteSpace(v) then "" else v.TrimEnd('/')
+
+// ---------------- APP ----------------
+let builder = WebApplication.CreateBuilder()
+let app = builder.Build()
+let http = new HttpClient()
+
+// ---------------- HELPERS (TASK ONLY) ----------------
+let getJson (url: string) = task {
+    let! res = http.GetAsync(url)
+    let! txt = res.Content.ReadAsStringAsync()
+    return JsonNode.Parse(txt)
+}
+
+let putJson (url: string) (body: JsonNode) = task {
+    let json = body.ToJsonString()
+    let content = new StringContent(json, Encoding.UTF8, "application/json")
+    let! _ = http.PutAsync(url, content)
+    return ()
+}
+
+// ---------------- ROOT ----------------
+app.MapGet("/", fun () ->
+    Results.Ok("AuthServer running")
+) |> ignore
+
+// ---------------- POST /hmx/oauth ----------------
 // ---------------- POST /hmx/oauth ----------------
 app.MapPost("/hmx/oauth", fun (ctx: HttpContext) : Task<unit> ->
     task {
@@ -81,3 +121,6 @@ app.MapPost("/hmx/oauth", fun (ctx: HttpContext) : Task<unit> ->
         return ()
     }
 ) |> ignore
+
+
+app.Run()
