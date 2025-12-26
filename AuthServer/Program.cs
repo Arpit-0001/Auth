@@ -53,7 +53,7 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
             await GetJson($"{firebaseDb}/app.json");
 
         string serverVersion =
-            appCfg["version"]!.GetValue<double>().ToString("0.0.0");
+            appCfg["version"]!.GetValue<string>();
 
         if (version != serverVersion)
         {
