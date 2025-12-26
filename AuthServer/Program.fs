@@ -55,8 +55,8 @@ app.MapPost(
                     )
                     return ()
                 else
-                    let id = body.["id"].GetValue<string>()
-                    let hwid = body?["hwid"].GetValue<string>()
+                    let id = body["id"].GetValue<string>()
+                    let hwid = body["hwid"].GetValue<string>()
                     let clientVersion = body.["version"].GetValue<float>()
 
                     let! appCfg = getJson($"{firebaseDbUrl}/app.json") : Task<JsonNode>
@@ -88,11 +88,12 @@ app.MapPost(
 
                             let count =
                                 if isNull attempt then 0
-                                else attempt?["count"].GetValue<int>()
+                                else attempt["count"].GetValue<int>()
+
 
                             let banUntil =
                                 if isNull attempt then 0L
-                                else attempt?["banUntil"].GetValue<int64>()
+                                else attempt["banUntil"].GetValue<int64>()
 
                             if banUntil > now then
                                 ctx.Response.StatusCode <- 403
