@@ -3,8 +3,8 @@ FROM mcr.microsoft.com/dotnet/sdk:6.0 AS build
 WORKDIR /src
 
 # Copy project file and restore
-COPY AuthServer/AuthServer.fsproj ./AuthServer/
-RUN dotnet restore AuthServer/AuthServer.fsproj
+COPY AuthServer/AuthServer.csproj ./AuthServer/
+RUN dotnet restore AuthServer/AuthServer.csproj
 
 # Copy everything else and publish
 COPY . .
