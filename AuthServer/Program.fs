@@ -1,6 +1,8 @@
 open System
 open System.Net.Http
+open System.Text
 open System.Text.Json
+open System.Text.Json.Nodes
 open Microsoft.AspNetCore.Builder
 open Microsoft.AspNetCore.Http
 open Microsoft.Extensions.Hosting
@@ -16,138 +18,116 @@ let app = builder.Build()
 
 let http = new HttpClient()
 
-// Helper function for GET requests (returning JSON)
-let getJson (url: string) =
-    async {
-        let! res = http.GetAsync(url) |> Async.AwaitTask
-        let! txt = res.Content.ReadAsStringAsync() |> Async.AwaitTask
-        return JsonDocument.Parse(txt).RootElement
-    }
+// ---------------- HELPERS (TASK ONLY) ----------------
+let getJson (url: string) = task {
+    let! res = http.GetAsync(url)
+    let! txt = res.Content.ReadAsStringAsync()
+    return JsonNode.Parse(txt)
+}
 
-// Helper function for PUT requests (sending JSON)
-let putJson (url: string) (body: obj) =
-    async {
-        let json = JsonSerializer.Serialize(body)
-        let content = new StringContent(json, System.Text.Encoding.UTF8, "application/json")
-        do! http.PutAsync(url, content) |> Async.AwaitTask
-    }
+let putJson (url: string) (body: JsonNode) = task {
+    let json = body.ToJsonString()
+    let content = new StringContent(json, Encoding.UTF8, "application/json")
+    let! _ = http.PutAsync(url, content)
+    return ()
+}
 
 // ---------------- ROOT ----------------
-app.MapGet(
-    "/",
-    Func<IResult>(fun () ->
-        Results.Ok("AuthServer running")
-    )
+app.MapGet("/", fun () ->
+    Results.Ok("AuthServer running")
 ) |> ignore
 
 // ---------------- POST /hmx/oauth ----------------
-app.MapPost(
-    "/hmx/oauth",
-    RequestDelegate(fun ctx ->
-        async {
-            try
-                // Deserialize the incoming request body
-                let! body =
-                    JsonSerializer.DeserializeAsync<JsonElement>(ctx.Request.Body) |> Async.AwaitTask
+app.MapPost("/hmx/oauth", fun (ctx: HttpContext) -> task {
 
-                // Check if 'id' property is provided in the request
-                if not (body.TryGetProperty("id") |> fst) then
-                    ctx.Response.StatusCode <- 400
+    try
+        // Read body
+        let! body = JsonNode.ParseAsync(ctx.Request.Body)
+
+        if isNull body || isNull body["id"] then
+            ctx.Response.StatusCode <- 400
+            do! ctx.Response.WriteAsJsonAsync(
+                {| success = false; error = "id missing" |}
+            )
+        else
+            let id = body["id"].GetValue<string>()
+            let hwid = body["hwid"].GetValue<string>()
+            let clientVersion = body["version"].GetValue<float>()
+
+            // App config
+            let! appCfg = getJson($"{firebaseDbUrl}/app.json")
+            let serverVersion = appCfg["version"].GetValue<float>()
+
+            // Version check
+            if clientVersion <> serverVersion then
+                ctx.Response.StatusCode <- 426
+                do! ctx.Response.WriteAsJsonAsync(
+                    {| success = false
+                       reason = "VERSION_MISMATCH"
+                       requiredVersion = serverVersion |}
+                )
+            else
+                // User
+                let! user = getJson($"{firebaseDbUrl}/users/{id}.json")
+
+                if isNull user then
+                    ctx.Response.StatusCode <- 401
                     do! ctx.Response.WriteAsJsonAsync(
-                        {| success = false; error = "id missing" |}
+                        {| success = false; reason = "INVALID_USER" |}
                     )
                 else
-                    let id = body.GetProperty("id").GetString()
+                    // HWID attempts
+                    let! attempt = getJson($"{firebaseDbUrl}/hwid_attempts/{hwid}.json")
 
-                    // Get App version from database
-                    let! appJson =
-                        getJson($"{firebaseDbUrl}/app.json")
-                    
-                    let serverVersion = appJson.GetProperty("version").GetDouble()
+                    let now = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
 
-                    // Get User data from database
-                    let! userJson =
-                        getJson($"{firebaseDbUrl}/users/{id}.json")
+                    let count =
+                        if isNull attempt then 0
+                        else attempt["count"].GetValue<int>()
 
-                    // Check if user exists
-                    let exists =
-                        userJson.ValueKind <> JsonValueKind.Null
+                    let banUntil =
+                        if isNull attempt then 0L
+                        else attempt["banUntil"].GetValue<int64>()
 
-                    if not exists then
+                    if banUntil > now then
+                        ctx.Response.StatusCode <- 403
                         do! ctx.Response.WriteAsJsonAsync(
-                            {| success = false; error = "Invalid user ID" |}
+                            {| success = false
+                               reason = "HWID_BANNED"
+                               retryAfter = banUntil - now |}
                         )
                     else
-                        let user = userJson
-                        let hwid = body.GetProperty("hwid").GetString()
-                        let version = body.GetProperty("version").GetDouble()
-
-                        // 1. Check version mismatch
-                        if version < serverVersion then
-                            ctx.Response.StatusCode <- 426 // Upgrade Required
+                        if count >= 3 then
+                            let ban = now + 86400L
+                            do!
+                                putJson
+                                    $"{firebaseDbUrl}/hwid_attempts/{hwid}.json"
+                                    (JsonNode.Parse(
+                                        $"""{{ "count": {count}, "lastFail": {now}, "banUntil": {ban} }}"""
+                                    ))
+                            ctx.Response.StatusCode <- 403
                             do! ctx.Response.WriteAsJsonAsync(
-                                {| success = false; reason = "VERSION_MISMATCH"; requiredVersion = serverVersion |}
+                                {| success = false
+                                   reason = "HWID_BANNED"
+                                   retryAfter = 86400 |}
                             )
                         else
-                            // 2. Check if user has valid features and is allowed to login
-                            let featuresEnabled = appJson.GetProperty("features")
-                            let hotmailEnabled = featuresEnabled.GetProperty("hotmail_inbox").GetProperty("enabled").GetBoolean()
+                            do!
+                                putJson
+                                    $"{firebaseDbUrl}/hwid_attempts/{hwid}.json"
+                                    (JsonNode.Parse(
+                                        $"""{{ "count": {count + 1}, "lastFail": {now}, "banUntil": 0 }}"""
+                                    ))
 
-                            if not hotmailEnabled && user.GetProperty("hotmail_inbox").GetBoolean() then
-                                ctx.Response.StatusCode <- 403 // Forbidden: Feature not enabled
-                                do! ctx.Response.WriteAsJsonAsync(
-                                    {| success = false; reason = "FEATURE_NOT_ENABLED"; feature = "hotmail_inbox" |}
-                                )
-                            else
-                                // 3. Check HWID Attempts
-                                let! hwidJson = getJson $"{firebaseDbUrl}/hwid_attempts/{hwid}.json"
+                            do! ctx.Response.WriteAsJsonAsync(
+                                {| success = true |}
+                            )
 
-                                let mutable count = 0
-                                let mutable banUntil = 0L
-                                if hwidJson.ValueKind <> JsonValueKind.Null then
-                                    let countProp = hwidJson.GetProperty("count").GetInt32()
-                                    let banUntilProp = hwidJson.GetProperty("banUntil").GetInt64()
-
-                                    count <- countProp
-                                    banUntil <- banUntilProp
-
-                                let now = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
-
-                                if banUntil > now then
-                                    ctx.Response.StatusCode <- 403 // Forbidden: HWID is banned
-                                    do! ctx.Response.WriteAsJsonAsync(
-                                        {| success = false; reason = "HWID_BANNED"; retryAfter = banUntil - now |}
-                                    )
-                                else
-                                    // 4. Increment the fail count and possibly ban the HWID
-                                    if count >= 3 then
-                                        let newBanUntil = now + 86400L // Ban for 1 day
-                                        do!
-                                            putJson $"{firebaseDbUrl}/hwid_attempts/{hwid}.json"
-                                            {| count = count; lastFail = now; banUntil = newBanUntil |}
-                                        ctx.Response.StatusCode <- 403
-                                        do! ctx.Response.WriteAsJsonAsync(
-                                            {| success = false; reason = "HWID_BANNED"; retryAfter = newBanUntil - now |}
-                                        )
-                                    else
-                                        // Update attempt count
-                                        do!
-                                            putJson $"{firebaseDbUrl}/hwid_attempts/{hwid}.json"
-                                            {| count = count + 1; lastFail = now; banUntil = 0L |}
-
-                                        // 5. Send successful login response with user data
-                                        do! ctx.Response.WriteAsJsonAsync(
-                                            {| success = true; user = userJson |}
-                                        )
-            with ex ->
-                ctx.Response.StatusCode <- 500
-                do! ctx.Response.WriteAsJsonAsync(
-                    {| success = false; error = ex.Message |}
-                )
-        }
-    )
-) |> ignore
+    with ex ->
+        ctx.Response.StatusCode <- 500
+        do! ctx.Response.WriteAsJsonAsync(
+            {| success = false; error = ex.Message |}
+        )
+})
 
 app.Run()
-
-
