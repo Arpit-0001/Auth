@@ -9,7 +9,7 @@ const string SECRET = "HMX_BY_MR_ARPIT_120";
 
 string firebaseDb =
     Environment.GetEnvironmentVariable("FIREBASE_DB_URL")!
-    .TrimEnd('/');
+        .TrimEnd('/');
 
 HttpClient http = new HttpClient();
 
@@ -40,15 +40,14 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
                 Encoding.UTF8.GetBytes(sig),
                 Encoding.UTF8.GetBytes(expectedSig)))
         {
-            ctx.Response.StatusCode = 401;
-            return Results.Json(new
+            return Results.Unauthorized(new
             {
                 success = false,
                 reason = "INVALID_SIGNATURE"
             });
         }
 
-        // ---------------- APP VERSION ----------------
+        // ---------------- APP CONFIG ----------------
         JsonNode appCfg =
             await GetJson($"{firebaseDb}/app.json");
 
@@ -57,8 +56,7 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
 
         if (version != serverVersion)
         {
-            ctx.Response.StatusCode = 426;
-            return Results.Json(new
+            return Results.StatusCode(426, new
             {
                 success = false,
                 reason = "UPDATE_REQUIRED",
@@ -73,81 +71,107 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
         if (user == null)
         {
             await RegisterFail(hwid);
-
-            ctx.Response.StatusCode = 401;
-            return Results.Json(new
+            return Results.Unauthorized(new
             {
                 success = false,
                 reason = "INVALID_USER"
             });
         }
 
-        // ---------------- HWID BAN ----------------
-        long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        JsonNode attempt =
-            await GetJson($"{firebaseDb}/hwid_attempts/{hwid}.json");
+        // ---------------- HWID POLICY (INTERNAL ONLY) ----------------
+        var policy = user["policy"]!;
+        int maxDevices = policy["max_devices"]!.GetValue<int>();
+        var hwids = policy["hwids"]!.AsObject();
 
-        int count = attempt?["count"]?.GetValue<int>() ?? 0;
-        long banUntil = attempt?["banUntil"]?.GetValue<long>() ?? 0;
+        bool hwidExists = hwids.Any(x => x.Value!.GetValue<string>() == hwid);
 
-        if (banUntil > now)
+        if (!hwidExists)
         {
-            ctx.Response.StatusCode = 403;
-            return Results.Json(new
-            {
-                success = false,
-                reason = "HWID_BANNED",
-                retryAfter = banUntil - now
-            });
-        }
-
-        if (count >= 3)
-        {
-            long ban = now + 86400;
-
-            await PutJson(
-                $"{firebaseDb}/hwid_attempts/{hwid}.json",
-                JsonNode.Parse(
-                    "{ \"count\": " + count +
-                    ", \"lastFail\": " + now +
-                    ", \"banUntil\": " + ban +
-                    " }"
-                )!
+            var emptySlot = hwids.FirstOrDefault(
+                x => string.IsNullOrEmpty(x.Value!.GetValue<string>())
             );
 
-            ctx.Response.StatusCode = 403;
-            return Results.Json(new
+            if (emptySlot.Key == null)
             {
-                success = false,
-                reason = "HWID_BANNED",
-                retryAfter = 86400
-            });
+                // lock internally
+                policy["hwid_locked"] = true;
+                await PutJson($"{firebaseDb}/users/{id}/policy.json", policy);
+
+                return Results.Forbid();
+            }
+
+            // assign hwid
+            hwids[emptySlot.Key] = hwid;
+            await PutJson($"{firebaseDb}/users/{id}/policy/hwids.json", hwids);
         }
 
-        // ---------------- SUCCESS ----------------
+        // ---------------- RESET FAIL COUNTER ----------------
+        long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         await PutJson(
             $"{firebaseDb}/hwid_attempts/{hwid}.json",
             JsonNode.Parse(
-                "{ \"count\": 0" +
-                ", \"lastFail\": " + now +
-                ", \"banUntil\": 0 }"
+                "{ \"count\": 0, \"lastFail\": " + now + ", \"banUntil\": 0 }"
             )!
         );
+
+        // ---------------- FEATURE FILTERING ----------------
+        var features = appCfg["features"]!.AsObject();
+        var responseFeatures = new JsonObject();
+
+        foreach (var feature in features)
+        {
+            bool enabled =
+                feature.Value!["enabled"]!.GetValue<bool>();
+
+            int minVersion =
+                feature.Value!["min_version"]!.GetValue<int>();
+
+            var f = new JsonObject
+            {
+                ["enabled"] = enabled,
+                ["min_version"] = minVersion
+            };
+
+            if (enabled)
+            {
+                foreach (var kv in feature.Value!.AsObject())
+                {
+                    if (kv.Key.EndsWith("_api_1"))
+                        f[kv.Key] = kv.Value;
+                }
+            }
+
+            responseFeatures[feature.Key] = f;
+        }
+
+        // ---------------- SAFE USER RESPONSE ----------------
+        var responseUser = new JsonObject
+        {
+            ["id"] = id,
+            ["name"] = user["name"],
+            ["dead_checker"] = user["dead_checker"],
+            ["live_checker"] = user["live_checker"],
+            ["purchased_checker"] = user["purchased_checker"],
+            ["not_purchased_checker"] = user["not_purchased_checker"],
+            ["hotmail_inbox"] = user["hotmail_inbox"],
+            ["xbox_pass"] = user["xbox_pass"]
+        };
 
         return Results.Ok(new
         {
             success = true,
-            name = user["name"]?.GetValue<string>()
+            user = responseUser,
+            features = responseFeatures,
+            server_time = now
         });
     }
     catch (Exception ex)
     {
-        ctx.Response.StatusCode = 500;
         return Results.Json(new
         {
             success = false,
             error = ex.Message
-        });
+        }, statusCode: 500);
     }
 });
 
@@ -169,25 +193,23 @@ static async Task<JsonNode?> GetJson(string url)
 {
     using HttpClient http = new();
     var res = await http.GetAsync(url);
-
     if (!res.IsSuccessStatusCode)
         return null;
 
-    string text = await res.Content.ReadAsStringAsync();
-    return JsonNode.Parse(text);
+    return JsonNode.Parse(await res.Content.ReadAsStringAsync());
 }
 
 static async Task PutJson(string url, JsonNode body)
 {
     using HttpClient http = new();
-    var content =
+    await http.PutAsync(
+        url,
         new StringContent(
             body.ToJsonString(),
             Encoding.UTF8,
             "application/json"
-        );
-
-    await http.PutAsync(url, content);
+        )
+    );
 }
 
 static async Task RegisterFail(string hwid)
