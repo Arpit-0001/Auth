@@ -38,14 +38,13 @@ app.MapGet("/", fun () ->
 ) |> ignore
 
 // ---------------- POST /hmx/oauth ----------------
-// ---------------- POST /hmx/oauth ----------------
-app.MapPost("/hmx/oauth", fun (ctx: HttpContext) : Task<unit> ->
+app.MapPost("/hmx/oauth", fun (ctx: HttpContext) ->
     task {
         try
             use sr = new System.IO.StreamReader(ctx.Request.Body)
             let! raw = sr.ReadToEndAsync()
             let body: JsonNode = JsonNode.Parse(raw)
-            
+
             if isNull body || isNull body["id"] then
                 ctx.Response.StatusCode <- 400
                 do! ctx.Response.WriteAsJsonAsync(
@@ -65,10 +64,10 @@ app.MapPost("/hmx/oauth", fun (ctx: HttpContext) : Task<unit> ->
                 let id = body["id"].GetValue<string>()
                 let hwid = body["hwid"].GetValue<string>()
                 let clientVersion = body["version"].GetValue<float>()
-                
+
                 let! appCfg = getJson($"{firebaseDbUrl}/app.json")
                 let serverVersion = appCfg["version"].GetValue<float>()
-                
+
                 if clientVersion <> serverVersion then
                     ctx.Response.StatusCode <- 426
                     do! ctx.Response.WriteAsJsonAsync(
@@ -88,7 +87,7 @@ app.MapPost("/hmx/oauth", fun (ctx: HttpContext) : Task<unit> ->
                         let now = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
                         let count = if isNull attempt then 0 else attempt["count"].GetValue<int>()
                         let banUntil = if isNull attempt then 0L else attempt["banUntil"].GetValue<int64>()
-                        
+
                         if banUntil > now then
                             ctx.Response.StatusCode <- 403
                             do! ctx.Response.WriteAsJsonAsync(
@@ -117,10 +116,9 @@ app.MapPost("/hmx/oauth", fun (ctx: HttpContext) : Task<unit> ->
             do! ctx.Response.WriteAsJsonAsync(
                 {| success = false; error = ex.Message |}
             )
-        // ensure the task returns unit
-        return ()
     }
 ) |> ignore
+
 
 
 app.Run()
