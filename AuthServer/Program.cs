@@ -156,6 +156,8 @@ if (policy == null)
 }
 
 bool hwidLocked = policy["hwid_locked"]?.GetValue<bool>() ?? false;
+
+
 var hwids = policy["hwids"] as JsonObject;
 
 // 🔒 Only enforce HWID rules when locked
