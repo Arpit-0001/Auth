@@ -1,33 +1,23 @@
-using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Hosting;
-
-var builder = WebApplication.CreateBuilder(args);
-var app = builder.Build();
+using System.Text.Json;
 
 // ================= CONFIG =================
 const string SERVER_VERSION = "1.0.0";
 const int MAX_ATTEMPTS = 3;
 const int BAN_SECONDS = 86400; // 1 day
 
-// ================= IN-MEMORY STORE (replace with DB later) =================
+// ================= APP =================
+var builder = WebApplication.CreateBuilder(args);
+var app = builder.Build();
+
+// ================= IN-MEMORY STORE =================
 var hwidAttempts = new Dictionary<string, AttemptInfo>();
-
-// ================= MODELS =================
-record AuthRequest(string Id, string Hwid, string Version);
-
-class AttemptInfo
-{
-    public int Count { get; set; }
-    public long BanUntil { get; set; }
-}
-
-// ================= ROUTES =================
 
 app.MapGet("/", () => "AuthServer running");
 
-// ---------- AUTH ----------
+// ================= AUTH ENDPOINT =================
 app.MapPost("/auth", async (HttpContext ctx) =>
 {
     AuthRequest? req;
@@ -57,13 +47,13 @@ app.MapPost("/auth", async (HttpContext ctx) =>
 
     var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
-    // ---------- HWID CHECK ----------
     if (!hwidAttempts.TryGetValue(req.Hwid, out var info))
     {
         info = new AttemptInfo();
         hwidAttempts[req.Hwid] = info;
     }
 
+    // ---------- BAN CHECK ----------
     if (info.BanUntil > now)
     {
         return Results.Json(new
@@ -74,8 +64,8 @@ app.MapPost("/auth", async (HttpContext ctx) =>
         }, statusCode: 403);
     }
 
-    // ---------- AUTH FAIL SIMULATION ----------
-    bool authSuccess = req.Id == "admin"; // replace with real auth
+    // ---------- AUTH LOGIC ----------
+    bool authSuccess = req.Id == "admin"; // replace later
 
     if (!authSuccess)
     {
@@ -114,3 +104,14 @@ app.MapPost("/auth", async (HttpContext ctx) =>
 });
 
 app.Run();
+
+
+// ================= MODELS (MUST BE AT END) =================
+
+record AuthRequest(string Id, string Hwid, string Version);
+
+class AttemptInfo
+{
+    public int Count { get; set; }
+    public long BanUntil { get; set; }
+}
