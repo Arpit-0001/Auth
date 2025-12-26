@@ -52,7 +52,7 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
         if (Version.Parse(version) != Version.Parse(serverVersion))
 
 
-        if (version != serverVersion)
+        if (Version.Parse(version) != Version.Parse(serverVersion))
         {
             return Results.Json(new
             {
