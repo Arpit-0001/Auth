@@ -1,6 +1,5 @@
 using System.Security.Cryptography;
 using System.Text;
-using System.Text.Json;
 using System.Text.Json.Nodes;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -20,7 +19,10 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
 {
     try
     {
-        var body = await JsonNode.ParseAsync(ctx.Request.Body);
+        using var reader = new StreamReader(ctx.Request.Body);
+        var jsonText = await reader.ReadToEndAsync();
+        var body = JsonNode.Parse(jsonText);
+
         if (body == null)
             return Results.BadRequest(new { success = false });
 
@@ -38,7 +40,8 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
                 Encoding.UTF8.GetBytes(sig),
                 Encoding.UTF8.GetBytes(expectedSig)))
         {
-            return Results.Unauthorized(new
+            ctx.Response.StatusCode = 401;
+            return Results.Json(new
             {
                 success = false,
                 reason = "INVALID_SIGNATURE"
@@ -54,13 +57,13 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
 
         if (version != serverVersion)
         {
-            return Results.StatusCode(426,
-                new
-                {
-                    success = false,
-                    reason = "UPDATE_REQUIRED",
-                    requiredVersion = serverVersion
-                });
+            ctx.Response.StatusCode = 426;
+            return Results.Json(new
+            {
+                success = false,
+                reason = "UPDATE_REQUIRED",
+                requiredVersion = serverVersion
+            });
         }
 
         // ---------------- USER ----------------
@@ -70,7 +73,9 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
         if (user == null)
         {
             await RegisterFail(hwid);
-            return Results.Unauthorized(new
+
+            ctx.Response.StatusCode = 401;
+            return Results.Json(new
             {
                 success = false,
                 reason = "INVALID_USER"
@@ -87,7 +92,8 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
 
         if (banUntil > now)
         {
-            return Results.StatusCode(403, new
+            ctx.Response.StatusCode = 403;
+            return Results.Json(new
             {
                 success = false,
                 reason = "HWID_BANNED",
@@ -98,18 +104,19 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
         if (count >= 3)
         {
             long ban = now + 86400;
+
             await PutJson(
                 $"{firebaseDb}/hwid_attempts/{hwid}.json",
-                JsonNode.Parse($$"""
-                {
-                    "count": {{count}},
-                    "lastFail": {{now}},
-                    "banUntil": {{ban}}
-                }
-                """)!
+                JsonNode.Parse(
+                    "{ \"count\": " + count +
+                    ", \"lastFail\": " + now +
+                    ", \"banUntil\": " + ban +
+                    " }"
+                )!
             );
 
-            return Results.StatusCode(403, new
+            ctx.Response.StatusCode = 403;
+            return Results.Json(new
             {
                 success = false,
                 reason = "HWID_BANNED",
@@ -120,13 +127,11 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
         // ---------------- SUCCESS ----------------
         await PutJson(
             $"{firebaseDb}/hwid_attempts/{hwid}.json",
-            JsonNode.Parse($$"""
-            {
-                "count": 0,
-                "lastFail": {{now}},
-                "banUntil": 0
-            }
-            """)!
+            JsonNode.Parse(
+                "{ \"count\": 0" +
+                ", \"lastFail\": " + now +
+                ", \"banUntil\": 0 }"
+            )!
         );
 
         return Results.Ok(new
@@ -137,8 +142,12 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
     }
     catch (Exception ex)
     {
-        return Results.StatusCode(500,
-            new { success = false, error = ex.Message });
+        ctx.Response.StatusCode = 500;
+        return Results.Json(new
+        {
+            success = false,
+            error = ex.Message
+        });
     }
 });
 
@@ -156,23 +165,32 @@ static string ComputeHmac(string raw)
     return Convert.ToHexString(hash).ToLower();
 }
 
-static async Task<JsonNode> GetJson(string url)
+static async Task<JsonNode?> GetJson(string url)
 {
     using HttpClient http = new();
-    var res = await http.GetStringAsync(url);
-    return JsonNode.Parse(res)!;
+    var res = await http.GetAsync(url);
+
+    if (!res.IsSuccessStatusCode)
+        return null;
+
+    string text = await res.Content.ReadAsStringAsync();
+    return JsonNode.Parse(text);
 }
 
 static async Task PutJson(string url, JsonNode body)
 {
     using HttpClient http = new();
     var content =
-        new StringContent(body.ToJsonString(),
-        Encoding.UTF8, "application/json");
+        new StringContent(
+            body.ToJsonString(),
+            Encoding.UTF8,
+            "application/json"
+        );
+
     await http.PutAsync(url, content);
 }
 
 static async Task RegisterFail(string hwid)
 {
-    // optional – already handled inline
+    await Task.CompletedTask;
 }
