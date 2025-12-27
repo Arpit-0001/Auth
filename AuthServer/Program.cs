@@ -6,6 +6,12 @@ var builder = WebApplication.CreateBuilder(args);
 var app = builder.Build();
 
 const string SECRET = "HMX_BY_MR_ARPIT_120";
+static string GenerateSessionToken()
+{
+    byte[] bytes = RandomNumberGenerator.GetBytes(32);
+    return Convert.ToHexString(bytes).ToLower();
+}
+
 
 string firebaseDb =
     Environment.GetEnvironmentVariable("FIREBASE_DB_URL")!
