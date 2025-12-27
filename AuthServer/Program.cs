@@ -94,9 +94,15 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
         JsonNode? user = await GetJson($"{firebaseDb}/users/{id}.json");
         if (user == null)
         {
-            await RegisterFailedAttempt(hwid);
-            return Results.Json(new { success = false, reason = "INVALID_USER" },statusCode: 401);
+            var remaining = await RegisterFailedAttempt(hwid);
+            return Results.Json(new
+            {
+                success = false,
+                reason = "INVALID_USER",
+                remaining_attempts = remaining
+            }, statusCode: 401);
         }
+
 
         // ---------- POLICY ----------
         var policy = user["policy"] as JsonObject;
