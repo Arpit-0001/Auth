@@ -116,8 +116,14 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
         {
             if (!hwids.Any(x => x.Value!.GetValue<string>() == hwid))
             {
-                await RegisterFailedAttempt(hwid);
-                return Results.Json(new { success = false, reason = "HWID_NOT_ALLOWED" },statusCode: 403);
+                var remaining = await RegisterFailedAttempt(hwid);
+                return Results.Json(new
+                {
+                    success = false,
+                    reason = "HWID_NOT_ALLOWED",
+                    remaining_attempts = remaining
+                }, statusCode: 403);
+
             }
         }
         else
