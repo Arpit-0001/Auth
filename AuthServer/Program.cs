@@ -148,13 +148,7 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
         }
 
 
-        // ---------- RESET FAILED ATTEMPTS ON SUCCESS ----------
-        await PutJson($"{firebaseDb}/hwid_attempts/{hwid}.json", new JsonObject
-        {
-            ["count"] = "3",
-            ["banned"] = false,
-            ["banUntil"] = 0
-        });
+
         
         // ---------- SUCCESS ----------
         return Results.Json(new
