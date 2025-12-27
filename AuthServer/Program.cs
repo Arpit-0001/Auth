@@ -182,6 +182,7 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
         {
 
             success = true,
+            session = session,
             user = new
             {
                 id,
