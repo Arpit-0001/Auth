@@ -151,10 +151,10 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
             {
                 id,
                 name = user["name"],
-                dead_checker = user["dead_checker"],
-                live_checker = user["live_checker"],
-                purchased_checker = user["purchased_checker"],
-                not_purchased_checker = user["not_purchased_checker"],
+                dead_checker = user["dead_checker"]!.GetValue<string>(),
+                live_checker = user["live_checker"]!.GetValue<string>(),
+                purchased_checker = user["purchased_checker"]!.GetValue<string>(),
+                not_purchased_checker = user["not_purchased_checker"]!.GetValue<string>(),
                 hotmail_inbox = user["hotmail_inbox"],
                 xbox_pass = user["xbox_pass"]
             },
@@ -201,7 +201,7 @@ static async Task RegisterFailedAttempt(string hwid)
     var node = await GetJson($"{baseUrl}/hwid_attempts/{hwid}.json");
     long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
-    int count = node?["count"]?.GetValue<int>() ?? 3;
+    int count = node?["count"]?int.Parse(node.GetValue<string>()) ?? 3;
     count--;
 
     if (count <= 0)
