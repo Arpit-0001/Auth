@@ -61,13 +61,15 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
                 Convert.FromHexString(sig),
                 Convert.FromHexString(expectedSig)))
         {
-        int remaining = int remaining = await RegisterFailedAttempt(hwid);
-        return Results.Json(new
-        {
-            success = false,
-            reason = "INVALID_USER",
-            remaining_attempts = remaining
-        }, statusCode: 401);
+            var remaining = await RegisterFailedAttempt(hwid);
+            return Results.Json(new
+            {
+                success = false,
+                reason = "INVALID_SIGNATURE",
+                remaining_attempts = remaining
+            }, statusCode: 401);
+        }
+
 
 
         // ---------- HWID BAN CHECK ----------
