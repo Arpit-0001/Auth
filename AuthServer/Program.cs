@@ -167,12 +167,16 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
 
         
         // ---------- SUCCESS ----------
-        await PutJson($"{firebaseDb}/hwid_attempts/{hwid}.json", new JsonObject
+        string session = GenerateSessionToken();
+        long expires = now + 1800; // 30 minutes
+        
+        await PutJson($"{firebaseDb}/sessions/{session}.json", new JsonObject
         {
-            ["count"] = 3,
-            ["banned"] = false,
-            ["banUntil"] = 0
+            ["id"] = id,
+            ["hwid"] = hwid,
+            ["expires"] = expires
         });
+
 
         return Results.Json(new
         {
