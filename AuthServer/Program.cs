@@ -204,6 +204,26 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
     }
 });
 
+app.MapPost("/hmx/validate", async (JsonNode body) =>
+{
+    string session = body["session"]!.GetValue<string>();
+    string hwid = body["hwid"]!.GetValue<string>();
+
+    var data = await GetJson($"{firebaseDb}/sessions/{session}.json");
+    if (data == null)
+        return Results.Json(new { valid = false });
+
+    long expires = data["expires"]!.GetValue<long>();
+    if (DateTimeOffset.UtcNow.ToUnixTimeSeconds() > expires)
+        return Results.Json(new { valid = false });
+
+    if (data["hwid"]!.GetValue<string>() != hwid)
+        return Results.Json(new { valid = false });
+
+    return Results.Json(new { valid = true });
+});
+
+
 app.Run();
 
 
