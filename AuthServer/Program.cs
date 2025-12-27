@@ -19,9 +19,8 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
     {
         using var reader = new StreamReader(ctx.Request.Body);
         var body = JsonNode.Parse(await reader.ReadToEndAsync());
-
         if (body == null)
-            return Results.Json("AuthServer running", statusCode: 200);
+            return Results.Json("AuthServer running");
 
         string id = body["id"]!.GetValue<string>();
         string hwid = body["hwid"]!.GetValue<string>();
@@ -37,20 +36,36 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
                 Convert.FromHexString(sig),
                 Convert.FromHexString(expectedSig)))
         {
-            return Results.Json(new
+            await RegisterFailedAttempt(hwid);
+            return Results.Json(new { success = false, reason = "INVALID_SIGNATURE" }, 401);
+        }
+
+        // ---------- HWID BAN CHECK ----------
+        var hwidAttempt = await GetJson($"{firebaseDb}/hwid_attempts/{hwid}.json");
+        long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+        if (hwidAttempt != null)
+        {
+            bool banned = hwidAttempt["banned"]?.GetValue<bool>() ?? false;
+            long banUntil = hwidAttempt["banUntil"]?.GetValue<long>() ?? 0;
+
+            if (banned && now < banUntil)
             {
-                success = false,
-                reason = "INVALID_SIGNATURE"
-            }, statusCode: 401);
+                return Results.Json(new
+                {
+                    success = false,
+                    reason = "HWID_BANNED",
+                    remaining = banUntil - now
+                }, 403);
+            }
         }
 
         // ---------- APP ----------
         JsonNode? appCfg = await GetJson($"{firebaseDb}/app.json");
         if (appCfg == null)
-            return Results.Json("AuthServer running", statusCode: 200);
+            return Results.Json("AuthServer running");
 
         string serverVersion = appCfg["version"]!.GetValue<string>();
-
         if (Version.Parse(version) != Version.Parse(serverVersion))
         {
             return Results.Json(new
@@ -58,67 +73,39 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
                 success = false,
                 reason = "UPDATE_REQUIRED",
                 requiredVersion = serverVersion
-            }, statusCode: 426);
+            }, 426);
         }
 
         // ---------- USER ----------
         JsonNode? user = await GetJson($"{firebaseDb}/users/{id}.json");
         if (user == null)
         {
-            return Results.Json(new
-            {
-                success = false,
-                reason = "INVALID_USER"
-            }, statusCode: 401);
+            await RegisterFailedAttempt(hwid);
+            return Results.Json(new { success = false, reason = "INVALID_USER" }, 401);
         }
 
-        // ---------- HWID POLICY ----------
+        // ---------- POLICY ----------
         var policy = user["policy"] as JsonObject;
         if (policy == null)
-        {
-            return Results.Json(new
-            {
-                success = false,
-                reason = "POLICY_MISSING"
-            }, statusCode: 500);
-        }
+            return Results.Json(new { success = false, reason = "POLICY_MISSING" }, 500);
 
         bool hwidLocked = policy["hwid_locked"]?.GetValue<bool>() ?? false;
-        var hwids = policy["hwids"] as JsonObject;
+        var hwids = policy["hwids"] as JsonObject ?? new JsonObject();
 
         if (hwidLocked)
         {
-            if (hwids == null || hwids.Count == 0)
+            if (!hwids.Any(x => x.Value!.GetValue<string>() == hwid))
             {
-                return Results.Json(new
-                {
-                    success = false,
-                    reason = "HWIDS_MISSING"
-                }, statusCode: 500);
-            }
-
-            bool allowed = hwids.Any(x => x.Value!.GetValue<string>() == hwid);
-            if (!allowed)
-            {
-                return Results.Json(new
-                {
-                    success = false,
-                    reason = "HWID_NOT_ALLOWED"
-                }, statusCode: 403);
+                await RegisterFailedAttempt(hwid);
+                return Results.Json(new { success = false, reason = "HWID_NOT_ALLOWED" }, 403);
             }
         }
         else
         {
-            if (hwids == null)
-                hwids = new JsonObject();
-
             bool exists = hwids.Any(x => x.Value!.GetValue<string>() == hwid);
             if (!exists)
             {
-                var free = hwids.FirstOrDefault(
-                    x => string.IsNullOrEmpty(x.Value!.GetValue<string>())
-                );
-
+                var free = hwids.FirstOrDefault(x => string.IsNullOrEmpty(x.Value!.GetValue<string>()));
                 if (free.Key != null)
                 {
                     hwids[free.Key] = hwid;
@@ -128,18 +115,33 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
         }
 
         // ---------- FEATURES ----------
-        var featuresCfg = appCfg["features"]!.AsObject();
+        var appFeatures = appCfg["features"] as JsonObject ?? new JsonObject();
         var featuresOut = new JsonObject();
 
-        foreach (var f in featuresCfg)
+        foreach (var f in appFeatures)
         {
-            featuresOut[f.Key] = new JsonObject
-            {
-                ["enabled"] = f.Value!["enabled"]!.GetValue<bool>(),
-                ["min_version"] = f.Value!["min_version"]!.GetValue<string>()
-            };
+            bool enabled = f.Value!["enabled"]!.GetValue<bool>();
+            string minVersion = f.Value!["min_version"]!.GetValue<string>();
+
+            featuresOut[f.Key] = enabled
+                ? new JsonObject
+                {
+                    ["enabled"] = true,
+                    ["min_version"] = minVersion
+                }
+                : new JsonObject
+                {
+                    ["enabled"] = false
+                };
         }
 
+        // ---------- RESET FAILED ATTEMPTS ON SUCCESS ----------
+        await PutJson($"{firebaseDb}/hwid_attempts/{hwid}.json", new JsonObject
+        {
+            ["count"] = "3",
+            ["banned"] = false,
+            ["banUntil"] = 0
+        });
 
         // ---------- SUCCESS ----------
         return Results.Json(new
@@ -157,29 +159,24 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
                 xbox_pass = user["xbox_pass"]
             },
             features = featuresOut,
-            server_time = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
+            server_time = now
         });
     }
     catch (Exception ex)
     {
-        return Results.Json(new
-        {
-            success = false,
-            error = ex.Message
-        }, statusCode: 500);
+        return Results.Json(new { success = false, error = ex.Message }, 500);
     }
 });
 
 app.Run();
+
 
 // ================= HELPERS =================
 
 static string ComputeHmac(string raw)
 {
     using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(SECRET));
-    return Convert.ToHexString(
-        hmac.ComputeHash(Encoding.UTF8.GetBytes(raw))
-    ).ToLower();
+    return Convert.ToHexString(hmac.ComputeHash(Encoding.UTF8.GetBytes(raw))).ToLower();
 }
 
 static async Task<JsonNode?> GetJson(string url)
@@ -188,19 +185,41 @@ static async Task<JsonNode?> GetJson(string url)
     var res = await http.GetAsync(url);
     if (!res.IsSuccessStatusCode)
         return null;
-
     return JsonNode.Parse(await res.Content.ReadAsStringAsync());
 }
 
 static async Task PutJson(string url, JsonNode body)
 {
     using HttpClient http = new();
-    await http.PutAsync(
-        url,
-        new StringContent(
-            body.ToJsonString(),
-            Encoding.UTF8,
-            "application/json"
-        )
-    );
+    await http.PutAsync(url,
+        new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json"));
+}
+
+static async Task RegisterFailedAttempt(string hwid)
+{
+    string baseUrl = Environment.GetEnvironmentVariable("FIREBASE_DB_URL")!.TrimEnd('/');
+    var node = await GetJson($"{baseUrl}/hwid_attempts/{hwid}.json");
+    long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+    int count = node?["count"]?.GetValue<int>() ?? 3;
+    count--;
+
+    if (count <= 0)
+    {
+        await PutJson($"{baseUrl}/hwid_attempts/{hwid}.json", new JsonObject
+        {
+            ["count"] = "3",
+            ["banned"] = true,
+            ["banUntil"] = now + 86400
+        });
+    }
+    else
+    {
+        await PutJson($"{baseUrl}/hwid_attempts/{hwid}.json", new JsonObject
+        {
+            ["count"] = count.ToString(),
+            ["banned"] = false,
+            ["banUntil"] = 0
+        });
+    }
 }
