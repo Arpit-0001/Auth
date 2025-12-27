@@ -23,7 +23,11 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
             return Results.Json("AuthServer running");
 
         string id = body["id"]!.GetValue<string>();
-        string hwid = body["hwid"]!.GetValue<string>();
+        string hwid = Convert.ToHexString(
+            SHA256.HashData(
+                Encoding.UTF8.GetBytes(body["hwid"]!.GetValue<string>())
+            )
+        );
         string version = body["version"]!.GetValue<string>();
         string nonce = body["nonce"]!.GetValue<string>();
         string sig = body["sig"]!.GetValue<string>();
