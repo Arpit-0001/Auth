@@ -28,9 +28,30 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
         string nonce = body["nonce"]!.GetValue<string>();
         string sig = body["sig"]!.GetValue<string>();
 
+        // ---------- HWID BAN CHECK ----------
+        var hwidAttempt = await GetJson($"{firebaseDb}/hwid_attempts/{hwid}.json");
+        long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        
+        if (hwidAttempt != null)
+        {
+            bool banned = hwidAttempt["banned"]?.GetValue<bool>() ?? false;
+            long banUntil = hwidAttempt["banUntil"]?.GetValue<long>() ?? 0;
+        
+            if (banned && now < banUntil)
+            {
+                return Results.Json(new
+                {
+                    success = false,
+                    reason = "HWID_BANNED",
+                    remaining = banUntil - now
+                }, statusCode: 403);
+            }
+        }
+        
         // ---------- HMAC ----------
         string raw = id + hwid + version + nonce;
         string expectedSig = ComputeHmac(raw);
+
 
         if (!CryptographicOperations.FixedTimeEquals(
                 Convert.FromHexString(sig),
