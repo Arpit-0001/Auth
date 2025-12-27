@@ -61,8 +61,14 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
                 Convert.FromHexString(sig),
                 Convert.FromHexString(expectedSig)))
         {
-            await RegisterFailedAttempt(hwid);
-            return Results.Json(new { success = false, reason = "INVALID_SIGNATURE" }, statusCode: 401);
+        int remaining = await RegisterFailedAttempt(hwid);
+        return Results.Json(new
+        {
+            success = false,
+            reason = "INVALID_SIGNATURE",
+            remaining_attempts = remaining
+        }, statusCode: 401);
+
         }
 
         // ---------- HWID BAN CHECK ----------
@@ -204,15 +210,15 @@ static async Task PutJson(string url, JsonNode body)
         new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json"));
 }
 
-static async Task RegisterFailedAttempt(string hwid)
+static async Task<int> RegisterFailedAttempt(string hwid)
 {
     string baseUrl = Environment.GetEnvironmentVariable("FIREBASE_DB_URL")!.TrimEnd('/');
     var node = await GetJson($"{baseUrl}/hwid_attempts/{hwid}.json");
     long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
     int count = node?["count"] != null
-    ? int.Parse(node["count"]!.GetValue<string>())
-    : 3;
+        ? node["count"]!.GetValue<int>()
+        : 3;
 
     count--;
 
@@ -220,18 +226,19 @@ static async Task RegisterFailedAttempt(string hwid)
     {
         await PutJson($"{baseUrl}/hwid_attempts/{hwid}.json", new JsonObject
         {
-            ["count"] = "3",
+            ["count"] = 0,
             ["banned"] = true,
             ["banUntil"] = now + 86400
         });
+        return 0;
     }
-    else
+
+    await PutJson($"{baseUrl}/hwid_attempts/{hwid}.json", new JsonObject
     {
-        await PutJson($"{baseUrl}/hwid_attempts/{hwid}.json", new JsonObject
-        {
-            ["count"] = count.ToString(),
-            ["banned"] = false,
-            ["banUntil"] = 0
-        });
-    }
+        ["count"] = count,
+        ["banned"] = false,
+        ["banUntil"] = 0
+    });
+
+    return count;
 }
