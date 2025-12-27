@@ -201,7 +201,10 @@ static async Task RegisterFailedAttempt(string hwid)
     var node = await GetJson($"{baseUrl}/hwid_attempts/{hwid}.json");
     long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
-    int count = node?["count"]?int.Parse(node.GetValue<string>()) ?? 3;
+    int count = node?["count"] != null
+    ? int.Parse(node["count"]!.GetValue<string>())
+    : 3;
+
     count--;
 
     if (count <= 0)
