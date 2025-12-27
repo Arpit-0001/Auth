@@ -37,7 +37,7 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
                 Convert.FromHexString(expectedSig)))
         {
             await RegisterFailedAttempt(hwid);
-            return Results.Json(new { success = false, reason = "INVALID_SIGNATURE" }, 401);
+            return Results.Json(new { success = false, reason = "INVALID_SIGNATURE" }, statusCode: 401);
         }
 
         // ---------- HWID BAN CHECK ----------
@@ -56,7 +56,7 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
                     success = false,
                     reason = "HWID_BANNED",
                     remaining = banUntil - now
-                }, 403);
+                },statusCode: 403);
             }
         }
 
@@ -73,7 +73,7 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
                 success = false,
                 reason = "UPDATE_REQUIRED",
                 requiredVersion = serverVersion
-            }, 426);
+            },statusCode: 426);
         }
 
         // ---------- USER ----------
@@ -81,13 +81,13 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
         if (user == null)
         {
             await RegisterFailedAttempt(hwid);
-            return Results.Json(new { success = false, reason = "INVALID_USER" }, 401);
+            return Results.Json(new { success = false, reason = "INVALID_USER" },statusCode: 401);
         }
 
         // ---------- POLICY ----------
         var policy = user["policy"] as JsonObject;
         if (policy == null)
-            return Results.Json(new { success = false, reason = "POLICY_MISSING" }, 500);
+            return Results.Json(new { success = false, reason = "POLICY_MISSING" },statusCode: 500);
 
         bool hwidLocked = policy["hwid_locked"]?.GetValue<bool>() ?? false;
         var hwids = policy["hwids"] as JsonObject ?? new JsonObject();
@@ -97,7 +97,7 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
             if (!hwids.Any(x => x.Value!.GetValue<string>() == hwid))
             {
                 await RegisterFailedAttempt(hwid);
-                return Results.Json(new { success = false, reason = "HWID_NOT_ALLOWED" }, 403);
+                return Results.Json(new { success = false, reason = "HWID_NOT_ALLOWED" },statusCode: 403);
             }
         }
         else
@@ -164,7 +164,7 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
     }
     catch (Exception ex)
     {
-        return Results.Json(new { success = false, error = ex.Message }, 500);
+        return Results.Json(new { success = false, error = ex.Message },statusCode: 500);
     }
 });
 
