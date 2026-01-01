@@ -12,7 +12,6 @@ static string GenerateSessionToken()
     return Convert.ToHexString(bytes).ToLower();
 }
 
-
 string firebaseDb =
     Environment.GetEnvironmentVariable("FIREBASE_DB_URL")!
         .TrimEnd('/');
@@ -58,7 +57,6 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
         string raw = id + hwid + version + nonce;
         string expectedSig = ComputeHmac(raw);
 
-
         if (!CryptographicOperations.FixedTimeEquals(
                 Convert.FromHexString(sig),
                 Convert.FromHexString(expectedSig)))
@@ -71,10 +69,6 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
                 remaining_attempts = remaining
             }, statusCode: 401);
         }
-
-
-
-        // ---------- HWID BAN CHECK ----------
 
         // ---------- APP ----------
         JsonNode? appCfg = await GetJson($"{firebaseDb}/app.json");
@@ -89,7 +83,7 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
                 success = false,
                 reason = "UPDATE_REQUIRED",
                 requiredVersion = serverVersion
-            },statusCode: 426);
+            }, statusCode: 426);
         }
 
         // ---------- USER ----------
@@ -105,11 +99,10 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
             }, statusCode: 401);
         }
 
-
         // ---------- POLICY ----------
         var policy = user["policy"] as JsonObject;
         if (policy == null)
-            return Results.Json(new { success = false, reason = "POLICY_MISSING" },statusCode: 500);
+            return Results.Json(new { success = false, reason = "POLICY_MISSING" }, statusCode: 500);
 
         bool hwidLocked = policy["hwid_locked"]?.GetValue<bool>() ?? false;
         var hwids = policy["hwids"] as JsonObject ?? new JsonObject();
@@ -125,7 +118,6 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
                     reason = "HWID_NOT_ALLOWED",
                     remaining_attempts = remaining
                 }, statusCode: 403);
-
             }
         }
         else
@@ -151,21 +143,14 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
             bool enabled = f.Value!["enabled"]!.GetValue<bool>();
             string minVersion = f.Value!["min_version"]!.GetValue<string>();
 
-            featuresOut[f.Key] = enabled
-                ? new JsonObject
-                {
-                    ["enabled"] = true,
-                    ["min_version"] = minVersion
-                }
-                : new JsonObject
-                {
-                    ["enabled"] = false
-                };
+            // ✅ Always include min_version
+            featuresOut[f.Key] = new JsonObject
+            {
+                ["enabled"] = enabled,
+                ["min_version"] = minVersion
+            };
         }
 
-
-
-        
         // ---------- SUCCESS ----------
         string session = GenerateSessionToken();
         long expires = now + 1800; // 30 minutes
@@ -177,10 +162,8 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
             ["expires"] = expires
         });
 
-
         return Results.Json(new
         {
-
             success = true,
             session = session,
             user = new
@@ -194,15 +177,50 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
                 hotmail_inbox = user["hotmail_inbox"],
                 xbox_pass = user["xbox_pass"]
             },
-            features = featuresOut,
+            // ✅ Wrap features under app with version
+            app = new
+            {
+                features = featuresOut,
+                version = serverVersion
+            },
             server_time = now
         });
     }
     catch (Exception ex)
     {
-        return Results.Json(new { success = false, error = ex.Message },statusCode: 500);
+        return Results.Json(new { success = false, error = ex.Message }, statusCode: 500);
     }
 });
+
+// ======================================================
+// BACKGROUND CLEANUP TASK (delete expired sessions hourly)
+// ======================================================
+var timer = new System.Threading.Timer(async _ =>
+{
+    try
+    {
+        var sessions = await GetJson($"{firebaseDb}/sessions.json");
+        if (sessions == null) return;
+
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        foreach (var kv in sessions.AsObject())
+        {
+            var expiresNode = kv.Value?["expires"];
+            if (expiresNode == null) continue;
+
+            long expires = expiresNode.GetValue<long>();
+            if (expires < now)
+            {
+                using HttpClient http = new();
+                await http.DeleteAsync($"{firebaseDb}/sessions/{kv.Key}.json");
+            }
+        }
+    }
+    catch
+    {
+        // swallow errors to keep timer alive
+    }
+}, null, TimeSpan.Zero, TimeSpan.FromHours(1));
 
 app.MapPost("/hmx/validate", async (JsonNode body) =>
 {
@@ -223,12 +241,9 @@ app.MapPost("/hmx/validate", async (JsonNode body) =>
     return Results.Json(new { valid = true });
 });
 
-
 app.Run();
 
-
 // ================= HELPERS =================
-
 static string ComputeHmac(string raw)
 {
     using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(SECRET));
@@ -255,31 +270,4 @@ static async Task<int> RegisterFailedAttempt(string hwid)
 {
     string baseUrl = Environment.GetEnvironmentVariable("FIREBASE_DB_URL")!.TrimEnd('/');
     var node = await GetJson($"{baseUrl}/hwid_attempts/{hwid}.json");
-    long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-
-    int count = node?["count"] != null
-        ? node["count"]!.GetValue<int>()
-        : 3;
-
-    count--;
-
-    if (count <= 0)
-    {
-        await PutJson($"{baseUrl}/hwid_attempts/{hwid}.json", new JsonObject
-        {
-            ["count"] = 0,
-            ["banned"] = true,
-            ["banUntil"] = now + 86400
-        });
-        return 0;
-    }
-
-    await PutJson($"{baseUrl}/hwid_attempts/{hwid}.json", new JsonObject
-    {
-        ["count"] = count,
-        ["banned"] = false,
-        ["banUntil"] = 0
-    });
-
-    return count;
-}
+    long now = Date
