@@ -270,4 +270,31 @@ static async Task<int> RegisterFailedAttempt(string hwid)
 {
     string baseUrl = Environment.GetEnvironmentVariable("FIREBASE_DB_URL")!.TrimEnd('/');
     var node = await GetJson($"{baseUrl}/hwid_attempts/{hwid}.json");
-    long now = Date
+    long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+    int count = node?["count"] != null
+        ? node["count"]!.GetValue<int>()
+        : 3;
+
+    count--;
+
+    if (count <= 0)
+    {
+        await PutJson($"{baseUrl}/hwid_attempts/{hwid}.json", new JsonObject
+        {
+            ["count"] = 0,
+            ["banned"] = true,
+            ["banUntil"] = now + 86400 // ban for 24h
+        });
+        return 0;
+    }
+
+    await PutJson($"{baseUrl}/hwid_attempts/{hwid}.json", new JsonObject
+    {
+        ["count"] = count,
+        ["banned"] = false,
+        ["banUntil"] = 0
+    });
+
+    return count;
+}
