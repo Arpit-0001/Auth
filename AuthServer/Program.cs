@@ -100,39 +100,68 @@ app.MapPost("/hmx/oauth", async (HttpContext ctx) =>
         }
 
         // ---------- POLICY ----------
+        // ---------- POLICY (WITH MAX_DEVICES SUPPORT) ----------
         var policy = user["policy"] as JsonObject;
         if (policy == null)
             return Results.Json(new { success = false, reason = "POLICY_MISSING" }, statusCode: 500);
-
+        
         bool hwidLocked = policy["hwid_locked"]?.GetValue<bool>() ?? false;
+        int maxDevices = policy["max_devices"] != null
+            ? int.Parse(policy["max_devices"]!.GetValue<string>())
+            : 1;
+        
+        // Get or create hwids object
         var hwids = policy["hwids"] as JsonObject ?? new JsonObject();
-
+        
+        // Check if HWID already exists
+        bool exists = hwids.Any(x => x.Value!.GetValue<string>() == hwid);
+        if (exists)
+            goto HWID_OK;
+        
+        // Count currently bound HWIDs
+        int usedSlots = hwids.Count(x => !string.IsNullOrEmpty(x.Value!.GetValue<string>()));
+        
         if (hwidLocked)
         {
-            if (!hwids.Any(x => x.Value!.GetValue<string>() == hwid))
+            return Results.Json(new
             {
-                var remaining = await RegisterFailedAttempt(hwid);
-                return Results.Json(new
-                {
-                    success = false,
-                    reason = "HWID_NOT_ALLOWED",
-                    remaining_attempts = remaining
-                }, statusCode: 403);
-            }
+                success = false,
+                reason = "HWID_LOCKED"
+            }, statusCode: 403);
+        }
+        
+        // If max devices reached → BLOCK
+        if (usedSlots >= maxDevices)
+        {
+            var remaining = await RegisterFailedAttempt(hwid);
+            return Results.Json(new
+            {
+                success = false,
+                reason = "MAX_DEVICE",
+                max_devices = maxDevices,
+                remaining_attempts = remaining
+            }, statusCode: 403);
+        }
+        
+        // Find empty slot
+        var emptySlot = hwids.FirstOrDefault(x => string.IsNullOrEmpty(x.Value!.GetValue<string>()));
+        
+        // If no empty slot but under max → CREATE slot
+        if (emptySlot.Key == null)
+        {
+            string newSlotKey = $"slot{hwids.Count + 1}";
+            hwids[newSlotKey] = hwid;
         }
         else
         {
-            bool exists = hwids.Any(x => x.Value!.GetValue<string>() == hwid);
-            if (!exists)
-            {
-                var free = hwids.FirstOrDefault(x => string.IsNullOrEmpty(x.Value!.GetValue<string>()));
-                if (free.Key != null)
-                {
-                    hwids[free.Key] = hwid;
-                    await PutJson($"{firebaseDb}/users/{id}/policy/hwids.json", hwids);
-                }
-            }
+            hwids[emptySlot.Key] = hwid;
         }
+        
+        // Save back to Firebase
+        await PutJson($"{firebaseDb}/users/{id}/policy/hwids.json", hwids);
+        
+        HWID_OK:;
+
 
         // ---------- FEATURES ----------
         var appFeatures = appCfg["features"] as JsonObject ?? new JsonObject();
