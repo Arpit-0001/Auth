@@ -251,24 +251,48 @@ var timer = new System.Threading.Timer(async _ =>
     }
 }, null, TimeSpan.Zero, TimeSpan.FromHours(1));
 
-app.MapPost("/hmx/validate", async (JsonNode body) =>
+app.MapPost("/hmx/validate", async (HttpContext ctx) =>
 {
-    string session = body["session"]!.GetValue<string>();
-    string hwid = body["hwid"]!.GetValue<string>();
+    try
+    {
+        using var reader = new StreamReader(ctx.Request.Body);
+        var body = JsonNode.Parse(await reader.ReadToEndAsync());
 
-    var data = await GetJson($"{firebaseDb}/sessions/{session}.json");
-    if (data == null)
-        return Results.Json(new { valid = false });
+        if (body == null)
+            return Results.Json("INVALID_SES");
 
-    long expires = data["expires"]!.GetValue<long>();
-    if (DateTimeOffset.UtcNow.ToUnixTimeSeconds() > expires)
-        return Results.Json(new { valid = false });
+        string session = body["session"]!.GetValue<string>();
+        string hwid = body["hwid"]!.GetValue<string>();
 
-    if (data["hwid"]!.GetValue<string>() != hwid)
-        return Results.Json(new { valid = false });
+        var data = await GetJson($"{firebaseDb}/sessions/{session}.json");
+        if (data == null)
+            return Results.Json("INVALID_SES");
 
-    return Results.Json(new { valid = true });
+        long expires = data["expires"]!.GetValue<long>();
+        long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+        // ⛔ expired
+        if (now > expires)
+        {
+            using HttpClient http = new();
+            await http.DeleteAsync($"{firebaseDb}/sessions/{session}.json");
+
+            return Results.Json("EXPIRED_SES");
+        }
+
+        // ⛔ HWID mismatch
+        if (data["hwid"]!.GetValue<string>() != hwid)
+            return Results.Json("INVALID_SES");
+
+        // ✅ valid
+        return Results.Json("VALID_SES");
+    }
+    catch
+    {
+        return Results.Json("INVALID_SES");
+    }
 });
+
 
 app.Run();
 
